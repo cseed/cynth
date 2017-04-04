@@ -9,17 +9,13 @@ sealed abstract class Expr {
     children.foreach(_.check())
   }
 
-  def emit(): Unit
-
-  def pretty(): Unit = emit()
+  def pretty(): Unit = print(toString)
 }
 
 case class Literal(size: Int, value: Int) extends Expr {
   def children = IndexedSeq()
 
-  def emit(): Unit = {
-    print(s"$size'd$value")
-  }
+  override def toString = s"$size'd$value"
 }
 
 case class Ref(v: Variable) extends Expr {
@@ -27,9 +23,7 @@ case class Ref(v: Variable) extends Expr {
 
   def size: Int = v.size
 
-  def emit(): Unit = {
-    print(s"${v.id}")
-  }
+  override def toString = s"${v.id}"
 }
 
 abstract class UnaryExpr extends Expr {
@@ -64,21 +58,11 @@ abstract class CompareExpr extends BinaryExpr {
 }
 
 case class AdditiveExpr(left: Expr, right: Expr, op: String) extends BinaryArithExpr {
-  def emit(): Unit = {
-    print("(")
-    left.emit()
-    print(s") $op (")
-    right.emit()
-    print(")")
-  }
+  override def toString = s"($left) $op ($right)"
 }
 
 case class Neg(child: Expr) extends UnaryArithExpr {
-  def emit(): Unit = {
-    print("- (")
-    child.emit()
-    print(")")
-  }
+  override def toString = "_ ($child)"
 }
 
 /*
@@ -104,17 +88,9 @@ case class Not(child: Expr) extends UnaryExpr {
 } */
 
 case class RelationalExpr(left: Expr, right: Expr, op: String, isSigned: Boolean) extends CompareExpr {
-  def emit(): Unit = {
-    if (isSigned)
-      print("$signed")
-    print("(")
-    left.emit()
-    print(s") $op ")
-    if (isSigned)
-      print("$signed")
-    print("(")
-    right.emit()
-    print(")")
+  override def toString = {
+    val s = if (isSigned) "$signed" else ""
+    s"$s($left) $op $s($right)"
   }
 }
 
@@ -124,14 +100,7 @@ case class SignExtend(size: Int, child: Expr) extends UnaryExpr {
     assert(child.size < size)
   }
 
-  def emit(): Unit = {
-    print(s"{${size - child.size}{")
-    // FIXME
-    child.emit()
-    print(s"[${child.size - 1}]}, ")
-    child.emit()
-    print(")}")
-  }
+  override def toString = s"{${size - child.size}{$child[${child.size - 1}]}, $child}"
 }
 
 case class ZeroExtend(size: Int, child: Expr) extends UnaryExpr {
@@ -140,11 +109,7 @@ case class ZeroExtend(size: Int, child: Expr) extends UnaryExpr {
     assert(child.size < size)
   }
 
-  def emit(): Unit = {
-    print(s"{${size - child.size}'d0, (")
-    child.emit()
-    print(")}")
-  }
+  override def toString = s"${size - child.size}'d0, ($child)}"
 }
 
 case class Truncate(size: Int, child: Expr) extends UnaryExpr {
@@ -153,12 +118,7 @@ case class Truncate(size: Int, child: Expr) extends UnaryExpr {
     assert(size < child.size)
   }
 
-  def emit(): Unit = {
-    print("(")
-    child.emit()
-    print(")")
-    print(s"[${size - 1}:0]")
-  }
+  override def toString = s"($child)[${size - 1}:0]"
 }
 
 sealed abstract class Variable {
@@ -190,13 +150,13 @@ sealed abstract class Statement {
 
   def pretty(): Unit
 
-  def emit(b: FunctionBody, next: Option[Int]): Unit = {
+  def emit(b: FunctionBody, next: Int): Unit = {
     println(s"        $id : begin")
     emitBody(b, next)
     println("        end")
   }
 
-  def emitBody(b: FunctionBody, next: Option[Int]): Unit =
+  def emitBody(b: FunctionBody, next: Int): Unit =
     throw new UnsupportedOperationException
 }
 
@@ -212,11 +172,9 @@ class Assign(v: Variable, expr: Expr) extends Statement {
     println(";")
   }
 
-  override def emitBody(b: FunctionBody, next: Option[Int]): Unit = {
-    print(s"          ${v.id} <= ")
-    expr.emit()
-    println(";")
-    println(s"          __state <= ${next.get};")
+  override def emitBody(b: FunctionBody, next: Int): Unit = {
+    println(s"          ${v.id} <= $expr;")
+    println(s"          __state <= $next;")
   }
 
 }
@@ -226,7 +184,7 @@ class Label(val id: String, var target: Target) {
 }
 
 class Goto(label: Label) extends Statement {
-  override def emitBody(b: FunctionBody, next: Option[Int]): Unit = {
+  override def emitBody(b: FunctionBody, next: Int): Unit = {
     println(s"          __state <= ${label.target.id};")
   }
 
@@ -247,8 +205,8 @@ class Target(label: Label) extends Statement {
     println(s" ${label.id}:")
   }
 
-  override def emitBody(b: FunctionBody, next: Option[Int]): Unit = {
-    println(s"          __state <= ${next.get};")
+  override def emitBody(b: FunctionBody, next: Int): Unit = {
+    println(s"          __state <= $next;")
   }
 }
 
@@ -267,10 +225,8 @@ class Branch(cond: Expr, thenLabel: Label, elseLabel: Label) extends Statement {
     println(s"    goto ${elseLabel.id};")
   }
 
-  override def emitBody(b: FunctionBody, next: Option[Int]): Unit = {
-    print(s"          if (")
-    cond.emit()
-    println(")")
+  override def emitBody(b: FunctionBody, next: Int): Unit = {
+    println(s"          if ($cond)")
     println(s"            __state <= ${thenLabel.target.id}")
     println("          else")
     println(s"            __state <= ${elseLabel.target.id}")
@@ -303,7 +259,7 @@ class Call(val target: Function,
     println(");")
   }
 
-  override def emit(b: FunctionBody, next: Option[Int]): Unit = {
+  override def emit(b: FunctionBody, next: Int): Unit = {
     val validState = Statement.newId()
 
     println(s"        $id : begin")
@@ -312,9 +268,7 @@ class Call(val target: Function,
     println(s"            __start_${target.id} <= 1;")
 
     (target.parameters, arguments).zipped.foreach { (p, a) =>
-      print(s"            __p_${p.id}_${target.id} <= ")
-      a.emit()
-      println(";")
+      println(s"            __p_${p.id}_${target.id} <= $a;")
     }
 
     println(s"            __state <= $validState;")
@@ -327,7 +281,7 @@ class Call(val target: Function,
     returnVariable.foreach { v =>
       println(s"            ${v.id} <= __retval_${target.id};")
     }
-    println(s"            __state <= ${next.get};")
+    println(s"            __state <= $next;")
     println(s"          end")
     println("        end")
   }
@@ -347,11 +301,9 @@ class Return(expr: Option[Expr]) extends Statement {
     println(";")
   }
 
-  override def emitBody(b: FunctionBody, next: Option[Int]): Unit = {
+  override def emitBody(b: FunctionBody, next: Int): Unit = {
     expr.foreach { e =>
-      print("          __retval <=");
-      e.emit()
-      println(";")
+      println(s"          __retval <= $e;")
     }
 
     println(s"          __state <= ${b.returnState};")
@@ -363,7 +315,8 @@ case class FunctionBody(variables: IndexedSeq[Variable],
   val idleState: Int = Statement.newId()
   val returnState: Int = Statement.newId()
 
-  def initialState: Int = stmts.head.id
+  def initialState: Int =
+    stmts.headOption.map(_.id).getOrElse(returnState)
 
   def check(f: Function): Unit = {
     stmts.foreach(_.check(f))
@@ -443,9 +396,9 @@ case class FunctionBody(variables: IndexedSeq[Variable],
     stmts.zipWithIndex.foreach { case (s, i) =>
       val next =
         if (i + 1 < stmts.length)
-          Some(stmts(i + 1).id)
+          stmts(i + 1).id
         else
-          None
+          returnState
 
       s.emit(this, next)
     }

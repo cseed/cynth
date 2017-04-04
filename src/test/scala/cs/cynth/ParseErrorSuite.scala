@@ -5,7 +5,10 @@ import org.scalatest.FunSuite
 class ParseErrorSuite extends FunSuite {
 
   val validFiles = Seq(
-    "alphabet-goto.c"
+    "alphabet-goto.c",
+    "empty-body.c",
+    "no-return.c",
+    "hex-literal.c"
   )
 
   test("valid") {

@@ -6,14 +6,10 @@ package cs.cynth
 // don't check idle in call
 // test example
 
-// rtl.Expr.emit => toVerilog: String
-// hex integer literals
-// fall off bottom
+// full grammar of operators, ?:, const shift
 // character literals
 
 // remove redundant states (don't emit label, goto, make next state more sophisticated)
-// implement emit on missing operators
-// mux
 
 // define function extern or not (std)
 
@@ -34,7 +30,7 @@ object Main {
 """
 
       // val cu = c.Parser.parseString(text)
-      val cu = c.Parser.parseFile("src/test/resources/valid/alphabet-goto.c")
+      val cu = c.Parser.parseFile("src/test/resources/valid/hex-literal.c")
       cu.check()
 
       cu.pretty()

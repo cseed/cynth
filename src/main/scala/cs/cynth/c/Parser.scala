@@ -323,13 +323,14 @@ object Parser extends RegexParsers {
       pos(ident) ^^ { id =>
         // FIXME check
         val decl = scope.lookup(id.pos, id.value)
-        println("id", id, decl)
         val v = decl.asInstanceOf[Variable]
         Expr(v.typ, IndexedSeq(), rtl.Ref(v.v))
       } |
-      "[0-9]+".r ^^ {
-        s => Expr(TInt(32), IndexedSeq(), rtl.Literal(32, s.toInt))
-      }
+      "0x[0-9a-fA-F]+".r ^^ { s =>
+        Expr(TInt(32), IndexedSeq(),
+          rtl.Literal(32, java.lang.Integer.parseInt(s.drop(2), 16)))
+      } |
+      "[0-9]+".r ^^ { s => Expr(TInt(32), IndexedSeq(), rtl.Literal(32, s.toInt)) }
 
   def stmt(scope: FScope): Parser[Stmts] =
     ("if" ~> "(" ~> expr(scope) <~ ")") ~ stmt(scope) ~ opt("else" ~> stmt(scope)) ^^ {
@@ -388,7 +389,9 @@ object Parser extends RegexParsers {
 
   def block_stmt(scope: FScope): Parser[Stmts] = {
     val bscope = new BlockScope(scope)
-    "{" ~> rep(stmt(bscope)) <~ "}" ^^ { _.toIndexedSeq.flatten }
+    "{" ~> rep(stmt(bscope)) <~ "}" ^^ {
+      _.toIndexedSeq.flatten
+    }
   }
 
   def param: Parser[Parameter] =
@@ -402,7 +405,9 @@ object Parser extends RegexParsers {
     }
 
   def parameters: Parser[IndexedSeq[Parameter]] =
-    repsep(param, ",") ^^ { _.toIndexedSeq }
+    repsep(param, ",") ^^ {
+      _.toIndexedSeq
+    }
 
   def function_head(fileScope: FileScope): Parser[Function] =
     typ ~ pos(ident) ~ ("(" ~> parameters <~ ")") ^^ { case returnTyp ~ id ~ params =>
@@ -411,7 +416,9 @@ object Parser extends RegexParsers {
 
   def function_body(fileScope: FileScope, f: Function): Parser[Stmts] = {
     val fscope = f.functionScope(fileScope)
-    "{" ~> rep(stmt(fscope)) <~ "}" ^^ {_.toIndexedSeq.flatten }
+    "{" ~> rep(stmt(fscope)) <~ "}" ^^ {
+      _.toIndexedSeq.flatten
+    }
   }
 
   def function(fileScope: FileScope): Parser[Function] =
@@ -429,9 +436,9 @@ object Parser extends RegexParsers {
   def compilation_unit: Parser[rtl.CompilationUnit] = {
     val fileScope = new FileScope
     rep(function(fileScope)) ^^ { _ =>
-        new rtl.CompilationUnit(fileScope.decls.values
-          .map(_.asInstanceOf[Function].rtlFunction)
-          .toSeq)
+      new rtl.CompilationUnit(fileScope.decls.values
+        .map(_.asInstanceOf[Function].rtlFunction)
+        .toSeq)
     }
   }
 }
