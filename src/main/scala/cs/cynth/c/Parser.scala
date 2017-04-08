@@ -267,20 +267,89 @@ object Parser extends RegexParsers {
           IndexedSeq(new rtl.Assign(v.v, e.convert(v.typ).expr)),
         rtl.Ref(v.v))
     } |
-      relational_expr(scope)
+      cond_expr(scope)
+
+  def cond_expr(scope: FScope): Parser[Expr] =
+    (ior_expr(scope) <~ "?") ~ (expr(scope) <~ ":") ~ cond_expr(scope) ^^ { case c ~ t ~ f =>
+      val (pt, pf) = t.arithmeticConversion(f)
+      Expr(pt.typ,
+        c.stmts ++ pt.stmts ++ pf.stmts,
+        rtl.Mux(
+          rtl.RelationalExpr(c.expr, rtl.Literal(c.typ.size, 0), "!=", isSigned = false),
+          pt.expr,
+          pf.expr))
+    } |
+      ior_expr(scope)
+
+  def ior_expr(scope: FScope): Parser[Expr] =
+    xor_expr(scope) ~ rep("|" ~ xor_expr(scope)) ^^ { case l ~ rs =>
+      rs.foldLeft(l) { case (l, op ~ r) =>
+        val (pl, pr) = l.arithmeticConversion(r)
+        Expr(pl.typ,
+          pl.stmts ++ pr.stmts,
+          rtl.BinaryLogicalExpr(pl.expr, pr.expr, "|"))
+      }
+    }
+
+  def xor_expr(scope: FScope): Parser[Expr] =
+    and_expr(scope) ~ rep("^" ~ and_expr(scope)) ^^ { case l ~ rs =>
+      rs.foldLeft(l) { case (l, op ~ r) =>
+        val (pl, pr) = l.arithmeticConversion(r)
+        Expr(pl.typ,
+          pl.stmts ++ pr.stmts,
+          rtl.BinaryLogicalExpr(pl.expr, pr.expr, "^"))
+      }
+    }
+
+  def and_expr(scope: FScope): Parser[Expr] =
+    equality_expr(scope) ~ rep("&" ~ equality_expr(scope)) ^^ { case l ~ rs =>
+      rs.foldLeft(l) { case (l, op ~ r) =>
+        val (pl, pr) = l.arithmeticConversion(r)
+        Expr(pl.typ,
+          pl.stmts ++ pr.stmts,
+          rtl.BinaryLogicalExpr(pl.expr, pr.expr, "&"))
+      }
+    }
+
+  def equality_expr(scope: FScope): Parser[Expr] =
+    relational_expr(scope) ~ rep(("==" | "!=") ~ relational_expr(scope)) ^^ { case l ~ rs =>
+      rs.foldLeft(l) { case (l, op ~ r) =>
+        val (pl, pr) = l.arithmeticConversion(r)
+        Expr(TInt(32),
+          pl.stmts ++ pr.stmts,
+          rtl.ZeroExtend(32,
+            rtl.RelationalExpr(pl.expr, pr.expr, op, pl.typ.isSigned)))
+      }
+    }
 
   def relational_expr(scope: FScope): Parser[Expr] =
     shift_expr(scope) ~ rep(("<=" | "<" | ">=" | ">") ~ shift_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(pl.typ,
+        Expr(TInt(32),
           pl.stmts ++ pr.stmts,
-          rtl.RelationalExpr(pl.expr, pr.expr, op, pl.typ.isSigned))
+          rtl.ZeroExtend(32,
+            rtl.RelationalExpr(pl.expr, pr.expr, op, pl.typ.isSigned)))
       }
     }
 
   def shift_expr(scope: FScope): Parser[Expr] =
-    additive_expr(scope)
+    additive_expr(scope) ~ rep(("<<" | ">>") ~ int_literal) ^^ { case l ~ rs =>
+      rs.foldLeft(l) { case (l, op ~ r) =>
+        val (_, dist) = r
+        val lp = l.integerPromotion()
+        Expr(lp.typ,
+          lp.stmts,
+          op match {
+            case "<<" => rtl.ShiftLeft(lp.expr, dist)
+            case ">>" =>
+              if (lp.typ.isSigned)
+                rtl.ShiftRightArithmetic(lp.expr, dist)
+              else
+                rtl.ShiftRightLogical(lp.expr, dist)
+          })
+      }
+    }
 
   def additive_expr(scope: FScope): Parser[Expr] =
     mult_expr(scope) ~ rep(("+" | "-") ~ mult_expr(scope)) ^^ { case l ~ rs =>
@@ -295,56 +364,120 @@ object Parser extends RegexParsers {
   def mult_expr(scope: FScope): Parser[Expr] =
     unary_expr(scope)
 
+  def cast_expr(scope: FScope): Parser[Expr] =
+    unary_expr(scope) |
+      ("(" ~> typ) ~ (")" ~> unary_expr(scope)) ^^ { case typ ~ e =>
+        e.convert(typ)
+      }
+
   def unary_expr(scope: FScope): Parser[Expr] =
-    "-" ~> unary_expr(scope) ^^ {
-      e =>
+    ("++" | "--") ~ unary_expr(scope: FScope) ^^ { case op ~ e =>
+      // FIXME
+      ???
+    } |
+      ("-" | "+" | "~" | "!") ~ cast_expr(scope) ^^ { case op ~ e =>
         val p = e.integerPromotion()
-        Expr(p.typ, p.stmts, rtl.Neg(p.expr))
+        op match {
+          case "-" => Expr(p.typ, p.stmts, rtl.Neg(p.expr))
+          case "+" => p
+          case "~" => Expr(p.typ, p.stmts, rtl.Not(p.expr))
+          case "!" => Expr(TInt(32), p.stmts,
+            rtl.ZeroExtend(32,
+              rtl.RelationalExpr(p.expr, rtl.Literal(p.typ.size, 0), "==", isSigned = false)))
+        }
+      } |
+      "sizeof" ~> expr(scope) ^^ { e =>
+        Expr(TInt(32), IndexedSeq(), rtl.Literal(32, e.typ.size))
+      } |
+      (("sizeof" ~ "(") ~> typ) <~ ")" ^^ { typ =>
+        Expr(TInt(32), IndexedSeq(), rtl.Literal(32, typ.size))
+      } |
+      postfix_expr(scope)
+
+  def postfix_expr(scope: FScope): Parser[Expr] =
+    (pos(ident) <~ "(") ~ repsep(expr(scope), ",") <~ ")" ^^ {
+      case id ~ args =>
+        val f = scope.lookup(id.pos, id.value).asInstanceOf[Function]
+        // FIXME void
+        // FIXME gensym
+        val retval = new rtl.Local(rtl.gensym("retval"), f.typ.returnTyp.size)
+        Expr(f.typ.returnTyp,
+          args.flatMap(e => e.stmts).toIndexedSeq :+
+            new rtl.Call(f.rtlFunction, Some(retval),
+              (f.typ.parameters, args).zipped.map {
+                case (p, a) =>
+                  a.convert(p.typ).expr
+              }.toIndexedSeq),
+          rtl.Ref(retval))
+    } | pos(ident) ~ ("++" | "--") ^^ { case id ~ op =>
+      val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
+
+      val ve = Expr(v.typ, IndexedSeq(), rtl.Ref(v.v))
+      val one = Expr(TInt(32), IndexedSeq(), rtl.Literal(32, 1))
+      val (vep, onep) = ve.arithmeticConversion(one)
+      val sum = Expr(
+        vep.typ,
+        vep.stmts ++ onep.stmts,
+        rtl.AdditiveExpr(vep.expr, onep.expr,
+          if (op == "++") "+" else "-"))
+
+      val t = new rtl.Local(rtl.gensym("postfix"), v.typ.size)
+
+      Expr(v.typ,
+        (IndexedSeq(new rtl.Assign(t, rtl.Ref(v.v))) ++ one.stmts) :+
+          new rtl.Assign(v.v, sum.convert(v.typ).expr),
+        rtl.Ref(v.v))
     } |
       primary_expr(scope)
 
   def primary_expr(scope: FScope): Parser[Expr] =
     "(" ~> expr(scope) <~ ")" |
-      (pos(ident) <~ "(") ~ repsep(expr(scope), ",") <~ ")" ^^ {
-        case id ~ args =>
-          val f = scope.lookup(id.pos, id.value).asInstanceOf[Function]
-          // FIXME void
-          // FIXME gensym
-          val retval = new rtl.Local(rtl.gensym("retval"), f.typ.returnTyp.size)
-          Expr(f.typ.returnTyp,
-            args.flatMap(e => e.stmts).toIndexedSeq :+
-              new rtl.Call(f.rtlFunction, Some(retval),
-                (f.typ.parameters, args).zipped.map {
-                  case (p, a) =>
-                    a.convert(p.typ).expr
-                }.toIndexedSeq),
-            rtl.Ref(retval))
-      } |
       pos(ident) ^^ { id =>
         // FIXME check
         val decl = scope.lookup(id.pos, id.value)
         val v = decl.asInstanceOf[Variable]
         Expr(v.typ, IndexedSeq(), rtl.Ref(v.v))
       } |
-      "0x[0-9a-fA-F]+".r ^^ { s =>
-        Expr(TInt(32), IndexedSeq(),
-          rtl.Literal(32, java.lang.Integer.parseInt(s.drop(2), 16)))
-      } |
-      "[0-9]+".r ^^ { s => Expr(TInt(32), IndexedSeq(), rtl.Literal(32, s.toInt)) }
+      int_literal ^^ { case (size, i) =>
+        Expr(TInt(size), IndexedSeq(), rtl.Literal(size, i))
+      }
+
+  def int_literal: Parser[(Int, Int)] =
+    "0x[0-9a-fA-F]+".r ^^ { s =>
+      (32, java.lang.Integer.parseInt(s.drop(2), 16))
+    } |
+      "[0-9]+".r ^^ { s => (32, s.toInt) } |
+      "'[^'\\\\\n]'".r ^^ { s => (8, s.apply(1).toInt) } |
+      "'\\['\\\\\"?abfnrtv]'".r ^^ { s =>
+        val c = s.apply(2) match {
+          case '\'' => '\''
+          case '\\' => '\\'
+          case '"' => '"'
+          case '?' => '?'
+          case 'a' => '\u0007'
+          case 'b' => '\b'
+          case 'f' => '\f'
+          case 'n' => '\n'
+          case 'r' => '\r'
+          case 't' => '\t'
+          case 'v' => '\u000b'
+        }
+
+        (8, c.toInt)
+      }
 
   def stmt(scope: FScope): Parser[Stmts] =
     ("if" ~> "(" ~> expr(scope) <~ ")") ~ stmt(scope) ~ opt("else" ~> stmt(scope)) ^^ {
       case cond ~ thenStmt ~ elseStmt =>
-        // FIXME customize
+        // FIXME specialize elseStmt == None
         val Lthen = new rtl.Label(rtl.genLabel())
         val Lelse = new rtl.Label(rtl.genLabel())
         val Lafter = new rtl.Label(rtl.genLabel())
 
         cond.stmts ++
           IndexedSeq(
-            // FIXME convert to boolean
-            // FIXME BooleanExpr
-            new rtl.Branch(cond.convert(TUInt(1)).expr, Lthen, Lelse),
+            new rtl.Branch(rtl.RelationalExpr(cond.expr, rtl.Literal(cond.typ.size, 0), "!=", isSigned = false),
+              Lthen, Lelse),
             new rtl.Target(Lthen)) ++
           thenStmt ++
           IndexedSeq(new rtl.Goto(Lafter),

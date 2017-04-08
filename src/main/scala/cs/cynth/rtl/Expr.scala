@@ -65,33 +65,70 @@ case class Neg(child: Expr) extends UnaryArithExpr {
   override def toString = "_ ($child)"
 }
 
-/*
-
-case class ShiftLeft(child: Expr, dist: Int) extends UnaryArithExpr
-
-case class ShiftRightLogical(child: Expr, dist: Int) extends UnaryArithExpr
-
-case class ShiftRightArithmetic(child: Expr, dist: Int) extends UnaryArithExpr
-
-case class Eq(left: Expr, right: Expr) extends CompareExpr
-
-case class Ne(left: Expr, right: Expr) extends CompareExpr
-
-// FIXME and, or, xor
-
-case class BitNot(child: Expr) extends UnaryExpr {
-  def size = child.size
+case class Not(child: Expr) extends UnaryArithExpr {
+  override def toString = "~ ($child)"
 }
 
-case class Not(child: Expr) extends UnaryExpr {
-  def size: Int = 1
-} */
-
 case class RelationalExpr(left: Expr, right: Expr, op: String, isSigned: Boolean) extends CompareExpr {
-  override def toString = {
+  override def toString: String = {
     val s = if (isSigned) "$signed" else ""
     s"$s($left) $op $s($right)"
   }
+}
+
+case class BinaryLogicalExpr(left: Expr, right: Expr, op: String) extends BinaryExpr {
+  def size: Int = left.size
+
+  override def toString: String = {
+    s"($left) $op ($right)"
+  }
+}
+
+case class ShiftLeft(child: Expr, right: Int) extends UnaryExpr {
+  def size: Int = child.size
+
+  override def toString: String = {
+    if (right >= size)
+      s"$size'd0"
+    else
+      s"{$child[${size - 1}:$right], $right'd0}"
+  }
+}
+
+case class ShiftRightLogical(child: Expr, right: Int) extends UnaryExpr {
+  def size: Int = child.size
+
+  override def toString: String = {
+    if (right >= size)
+      s"$size'd0"
+    else
+      s"{$right'd0, $child[${size - right - 1}:0]}"
+  }
+}
+
+case class ShiftRightArithmetic(child: Expr, right: Int) extends UnaryExpr {
+  def size: Int = child.size
+
+  override def toString: String = {
+    if (right >= size)
+      s"$size'd0"
+    else
+    // FIXME deduplicate
+      s"{$right{$child[${size - 1}]}, $child[${size - right - 1}:0]}"
+  }
+}
+
+case class Mux(cond: Expr, left: Expr, right: Expr) extends Expr {
+  def children = IndexedSeq(cond, left, right)
+
+  override def check(): Unit = {
+    assert(left.size == right.size)
+    assert(cond.size == 1)
+  }
+
+  def size: Int = left.size
+
+  override def toString: String = s"($cond) ? ($left) : ($right)"
 }
 
 case class SignExtend(size: Int, child: Expr) extends UnaryExpr {

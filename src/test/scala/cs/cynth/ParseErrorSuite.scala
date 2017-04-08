@@ -13,6 +13,7 @@ class ParseErrorSuite extends FunSuite {
 
   test("valid") {
     validFiles.foreach { f =>
+      println(f)
       val cu = c.Parser.parseFile("src/test/resources/valid/" + f)
       cu.check()
     }
