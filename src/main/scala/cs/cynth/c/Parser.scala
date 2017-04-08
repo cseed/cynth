@@ -23,12 +23,25 @@ ${lineContents.take(pos.column - 1).map { c => if (c == '\t') c else ' ' }}^
   def parseError(msg: String): Nothing = Parser.parseError(fmt(msg))
 }
 
+object Type {
+  val bool: Type = TUInt(1)
+  val char: Type = TInt(8)
+  val unsignedChar: Type = TUInt(8)
+  val signedChar: Type = TInt(8)
+  val short: Type = TInt(16)
+  val unsignedShort: Type = TInt(16)
+  val int: Type = TInt(32)
+  val unsigned: Type = TUInt(32)
+  val long: Type = TInt(64)
+  val unsignedLong: Type = TUInt(64)
+}
+
 sealed abstract class Type {
   def size: Int
 
   def integerPromotion(): Type = {
-    if (size < 32)
-      TInt(32)
+    if (size < Type.int.size)
+      Type.int
     else
       this
   }
@@ -38,10 +51,10 @@ sealed abstract class Type {
       this
     else if (other.size > size)
       other
-    else if (isInstanceOf[TUInt])
-      this
-    else
+    else if (isSigned)
       other
+    else
+      this
   }
 
   def isSigned: Boolean = (this: @unchecked) match {
@@ -63,37 +76,132 @@ case class TFunction(returnTyp: Type,
   def size: Int = ???
 }
 
-// FIXME Value, Bool exprs
-case class Expr(typ: Type,
-                stmts: Stmts,
-                expr: rtl.Expr) {
-  def convert(newTyp: Type): Expr = {
-    Expr(newTyp,
-      stmts,
+object Expr {
+  def literal(typ: Type, i: Integer): Expr =
+    VExpr(typ, rtl.Literal(typ.size, i))
+}
+
+object Block {
+  def empty: Block = new Block(IndexedSeq())
+}
+
+class Block(val stmts: IndexedSeq[rtl.Statement]) {
+  def this(s: rtl.Statement) = this(IndexedSeq(s))
+
+  def ++(b: Block) = new Block(stmts ++ b.stmts)
+
+  def ++(e: Expr): Expr = e.prepend(this)
+
+  def ++(s: rtl.Statement) = new Block(stmts :+ s)
+}
+
+abstract class Expr {
+  // value interface
+  def typ: Type
+
+  def valueExpr: VExpr
+
+  def boolExpr: BExpr
+
+  def convert(newTyp: Type): VExpr = {
+    val ve = valueExpr
+    VExpr(newTyp,
+      ve.b,
       if (newTyp.size == typ.size)
-        expr
+        ve.expr
       else if (newTyp.size < typ.size)
-        rtl.Truncate(newTyp.size, expr)
+        rtl.Truncate(newTyp.size, ve.expr)
       else
         (typ: @unchecked) match {
           case TInt(_) =>
-            rtl.SignExtend(newTyp.size, expr)
+            rtl.SignExtend(newTyp.size, ve.expr)
           case TUInt(_) =>
-            rtl.ZeroExtend(newTyp.size, expr)
+            rtl.ZeroExtend(newTyp.size, ve.expr)
           // FIXME check
         })
   }
 
-  def integerPromotion(): Expr = convert(typ.integerPromotion())
+  def integerPromotion(): VExpr = convert(typ.integerPromotion()).valueExpr
 
-  def arithmeticConversion(other: Expr): (Expr, Expr) = {
+  def arithmeticConversion(other: Expr): (VExpr, VExpr) = {
     val p = integerPromotion()
     val pother = other.integerPromotion()
 
     val newTyp = p.typ.arithmeticConversion(pother.typ)
     (p.convert(newTyp), pother.convert(newTyp))
   }
+
+  def binaryArithOp(rhs: Expr)(rtlOp: (rtl.Expr, rtl.Expr) => rtl.Expr): Expr = {
+    val (cl, cr) = arithmeticConversion(rhs)
+    VExpr(cl.typ,
+      cl.b ++ cr.b,
+      rtlOp(cl.expr, cr.expr))
+  }
+
+  def prepend(before: Block): Expr
+
+  def effect(): Block
+
+  def ++(after: Block): Block = effect() ++ after
 }
+
+object VExpr {
+  def apply(typ: Type, expr: rtl.Expr): VExpr = VExpr(typ, Block.empty, expr)
+}
+
+case class VExpr(typ: Type,
+                 b: Block,
+                 expr: rtl.Expr) extends Expr {
+  def valueExpr: VExpr = this
+
+  def boolExpr: BExpr = {
+    val Ltrue = new rtl.Label(rtl.genLabel())
+    val Lfalse = new rtl.Label(rtl.genLabel())
+
+    BExpr(typ,
+      b ++
+        new rtl.Branch(
+          rtl.RelationalExpr(expr, rtl.Literal(typ.size, 0), "!=", isSigned = false),
+          Ltrue,
+          Lfalse),
+      new rtl.Target(Ltrue),
+      new rtl.Target(Lfalse))
+  }
+
+  def prepend(before: Block): Expr = copy(b = before ++ b)
+
+  def effect(): Block = b
+}
+
+case class BExpr(typ: Type,
+                 b: Block,
+                 trueTarget: rtl.Target,
+                 falseTarget: rtl.Target) extends Expr {
+  def valueExpr: VExpr = {
+    val t = Local.gen(typ, "t")
+    val Lafter = new rtl.Label(rtl.genLabel())
+    (b ++
+      trueTarget ++
+      t.assign(Expr.literal(typ, 1)) ++
+      new rtl.Goto(Lafter) ++
+      falseTarget ++
+      t.assign(Expr.literal(typ, 0)) ++
+      new rtl.Target(Lafter) ++
+      t.ref()).valueExpr
+  }
+
+  def boolExpr: BExpr = this
+
+  def prepend(before: Block): Expr = copy(b = before ++ b)
+
+  def effect(): Block = {
+    b ++
+      trueTarget ++
+      // fall through
+      falseTarget
+  }
+}
+
 
 sealed abstract class Decl {
   def pos: Position
@@ -101,18 +209,42 @@ sealed abstract class Decl {
   def id: String
 
   def typ: Type
+
 }
 
+// FIXME Variable shouldn't extend Decl, mix into Local, Parameter
 abstract class Variable extends Decl {
-  def v: rtl.Variable
+  val v: rtl.Variable
+
+  def assign(e: Expr): Block = {
+    val c = e.convert(typ)
+    c.b ++ new rtl.Assign(v, c.expr)
+  }
+
+  def ref(): Expr = VExpr(typ, rtl.Ref(v))
+}
+
+object Local {
+  def gen(vtyp: Type, root: String): Variable = {
+    val vid = rtl.gensym(root)
+    new Variable {
+      def pos: Position = ???
+
+      def id: String = vid
+
+      def typ: Type = vtyp
+
+      val v = new rtl.Local(id, vtyp.size)
+    }
+  }
 }
 
 case class Local(pos: Position, id: String, typ: Type) extends Variable {
-  def v = new rtl.Local(id, typ.size)
+  val v = new rtl.Local(id, typ.size)
 }
 
 case class Parameter(pos: Position, id: String, typ: Type) extends Variable {
-  def v = new rtl.Parameter(id, typ.size)
+  val v = new rtl.Parameter(id, typ.size)
 }
 
 case class Function(pos: Position, id: String, typ: TFunction) extends Decl {
@@ -244,10 +376,13 @@ object Parser extends RegexParsers {
   def typ: Parser[Type] =
     "int[0-9]+".r ^^ { s => TInt(s.drop(3).toInt) } |
       "uint[0-9]+".r ^^ { s => TUInt(s.drop(4).toInt) } |
-      "int" ^^ { _ => TInt(32) } |
-      "unsigned" ^^ { _ => TUInt(32) } |
+      "char" ^^ { _ => Type.char } |
+      "short" ^^ { _ => Type.short } |
+      "int" ^^ { _ => Type.int } |
+      "unsigned" ^^ { _ => Type.unsigned } |
+      "long" ^^ { _ => Type.long } |
       // FIXME _Bool type?
-      "_Bool" ^^ { _ => TUInt(1) } |
+      "_Bool" ^^ { _ => Type.bool } |
       "void" ^^ { _ => TVoid }
 
   def ident: Parser[String] =
@@ -262,31 +397,67 @@ object Parser extends RegexParsers {
   def assign_expr(scope: FScope): Parser[Expr] =
     (pos(ident) <~ "=") ~ assign_expr(scope) ^^ { case id ~ e =>
       val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
-      Expr(v.typ,
-        e.stmts ++
-          IndexedSeq(new rtl.Assign(v.v, e.convert(v.typ).expr)),
-        rtl.Ref(v.v))
+      val c = e.convert(v.typ)
+      v.assign(c) ++ v.ref()
     } |
       cond_expr(scope)
 
   def cond_expr(scope: FScope): Parser[Expr] =
-    (ior_expr(scope) <~ "?") ~ (expr(scope) <~ ":") ~ cond_expr(scope) ^^ { case c ~ t ~ f =>
+    ior_expr(scope) ~ pos("?") ~ (expr(scope) <~ ":") ~ cond_expr(scope) ^^ { case c ~ q ~ t ~ f =>
+      val Lafter = new rtl.Label(rtl.genLabel())
+
+      val bc = c.boolExpr
       val (pt, pf) = t.arithmeticConversion(f)
-      Expr(pt.typ,
-        c.stmts ++ pt.stmts ++ pf.stmts,
-        rtl.Mux(
-          rtl.RelationalExpr(c.expr, rtl.Literal(c.typ.size, 0), "!=", isSigned = false),
-          pt.expr,
-          pf.expr))
+      val r = Local.gen(pt.typ, "mux")
+
+      bc.b ++
+        bc.trueTarget ++
+        r.assign(pt) ++
+        new rtl.Goto(Lafter) ++
+        bc.falseTarget ++
+        r.assign(pf) ++
+        // fall through
+        new rtl.Target(Lafter) ++
+        r.ref()
     } |
-      ior_expr(scope)
+      logical_or_expr(scope)
+
+  def logical_or_expr(scope: FScope): Parser[Expr] =
+    logical_and_expr(scope) ~ rep("||" ~> logical_and_expr(scope)) ^^ { case l ~ rs =>
+      rs.foldLeft(l.boolExpr) { case (l, r) =>
+        val br = r.boolExpr
+        BExpr(Type.int,
+          l.b ++
+            l.falseTarget ++
+            br.b ++
+            br.trueTarget ++
+            new rtl.Goto(l.trueTarget.label),
+          l.trueTarget,
+          br.falseTarget)
+      }
+    }
+
+  def logical_and_expr(scope: FScope): Parser[Expr] =
+    ior_expr(scope) ~ rep("&&" ~> ior_expr(scope)) ^^ { case l ~ rs =>
+      rs.foldLeft(l.boolExpr) { case (l, r) =>
+        val br = r.boolExpr
+        BExpr(Type.int,
+          l.b ++
+            l.trueTarget ++
+            br.b ++
+            br.falseTarget ++
+            new rtl.Goto(l.falseTarget.label),
+          br.trueTarget,
+          l.falseTarget)
+      }
+    }
 
   def ior_expr(scope: FScope): Parser[Expr] =
     xor_expr(scope) ~ rep("|" ~ xor_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(pl.typ,
-          pl.stmts ++ pr.stmts,
+        VExpr(pl.typ,
+          pl.b ++ pr.b,
           rtl.BinaryLogicalExpr(pl.expr, pr.expr, "|"))
       }
     }
@@ -295,8 +466,8 @@ object Parser extends RegexParsers {
     and_expr(scope) ~ rep("^" ~ and_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(pl.typ,
-          pl.stmts ++ pr.stmts,
+        VExpr(pl.typ,
+          pl.b ++ pr.b,
           rtl.BinaryLogicalExpr(pl.expr, pr.expr, "^"))
       }
     }
@@ -305,8 +476,8 @@ object Parser extends RegexParsers {
     equality_expr(scope) ~ rep("&" ~ equality_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(pl.typ,
-          pl.stmts ++ pr.stmts,
+        VExpr(pl.typ,
+          pl.b ++ pr.b,
           rtl.BinaryLogicalExpr(pl.expr, pr.expr, "&"))
       }
     }
@@ -315,8 +486,8 @@ object Parser extends RegexParsers {
     relational_expr(scope) ~ rep(("==" | "!=") ~ relational_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(TInt(32),
-          pl.stmts ++ pr.stmts,
+        VExpr(TInt(32),
+          pl.b ++ pr.b,
           rtl.ZeroExtend(32,
             rtl.RelationalExpr(pl.expr, pr.expr, op, pl.typ.isSigned)))
       }
@@ -326,8 +497,8 @@ object Parser extends RegexParsers {
     shift_expr(scope) ~ rep(("<=" | "<" | ">=" | ">") ~ shift_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(TInt(32),
-          pl.stmts ++ pr.stmts,
+        VExpr(TInt(32),
+          pl.b ++ pr.b,
           rtl.ZeroExtend(32,
             rtl.RelationalExpr(pl.expr, pr.expr, op, pl.typ.isSigned)))
       }
@@ -338,8 +509,8 @@ object Parser extends RegexParsers {
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (_, dist) = r
         val lp = l.integerPromotion()
-        Expr(lp.typ,
-          lp.stmts,
+        VExpr(lp.typ,
+          lp.b,
           op match {
             case "<<" => rtl.ShiftLeft(lp.expr, dist)
             case ">>" =>
@@ -355,8 +526,8 @@ object Parser extends RegexParsers {
     mult_expr(scope) ~ rep(("+" | "-") ~ mult_expr(scope)) ^^ { case l ~ rs =>
       rs.foldLeft(l) { case (l, op ~ r) =>
         val (pl, pr) = l.arithmeticConversion(r)
-        Expr(pl.typ,
-          pl.stmts ++ pr.stmts,
+        VExpr(pl.typ,
+          pl.b ++ pr.b,
           rtl.AdditiveExpr(pl.expr, pr.expr, op))
       }
     }
@@ -371,62 +542,57 @@ object Parser extends RegexParsers {
       }
 
   def unary_expr(scope: FScope): Parser[Expr] =
-    ("++" | "--") ~ unary_expr(scope: FScope) ^^ { case op ~ e =>
-      // FIXME
-      ???
+    ("++" | "--") ~ pos(ident) ^^ { case op ~ id =>
+      val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
+      v.assign(
+        v.ref().binaryArithOp(Expr.literal(Type.int, 1))((l, r) =>
+          rtl.AdditiveExpr(l, r, op))) ++
+        v.ref()
     } |
       ("-" | "+" | "~" | "!") ~ cast_expr(scope) ^^ { case op ~ e =>
         val p = e.integerPromotion()
         op match {
-          case "-" => Expr(p.typ, p.stmts, rtl.Neg(p.expr))
+          case "-" => VExpr(p.typ, p.b, rtl.Neg(p.expr))
           case "+" => p
-          case "~" => Expr(p.typ, p.stmts, rtl.Not(p.expr))
-          case "!" => Expr(TInt(32), p.stmts,
-            rtl.ZeroExtend(32,
-              rtl.RelationalExpr(p.expr, rtl.Literal(p.typ.size, 0), "==", isSigned = false)))
+          case "~" => VExpr(p.typ, p.b, rtl.Not(p.expr))
+          case "!" =>
+            val bp = p.boolExpr
+            BExpr(bp.typ,
+              bp.b,
+              bp.falseTarget,
+              bp.trueTarget)
         }
       } |
       "sizeof" ~> expr(scope) ^^ { e =>
-        Expr(TInt(32), IndexedSeq(), rtl.Literal(32, e.typ.size))
+        Expr.literal(Type.int, e.typ.size)
       } |
       (("sizeof" ~ "(") ~> typ) <~ ")" ^^ { typ =>
-        Expr(TInt(32), IndexedSeq(), rtl.Literal(32, typ.size))
+        Expr.literal(Type.int, typ.size)
       } |
       postfix_expr(scope)
 
   def postfix_expr(scope: FScope): Parser[Expr] =
-    (pos(ident) <~ "(") ~ repsep(expr(scope), ",") <~ ")" ^^ {
-      case id ~ args =>
-        val f = scope.lookup(id.pos, id.value).asInstanceOf[Function]
-        // FIXME void
-        // FIXME gensym
-        val retval = new rtl.Local(rtl.gensym("retval"), f.typ.returnTyp.size)
-        Expr(f.typ.returnTyp,
-          args.flatMap(e => e.stmts).toIndexedSeq :+
-            new rtl.Call(f.rtlFunction, Some(retval),
-              (f.typ.parameters, args).zipped.map {
-                case (p, a) =>
-                  a.convert(p.typ).expr
-              }.toIndexedSeq),
-          rtl.Ref(retval))
+    (pos(ident) <~ "(") ~ repsep(expr(scope), ",") <~ ")" ^^ { case id ~ args =>
+      // FIXME check
+      val f = scope.lookup(id.pos, id.value).asInstanceOf[Function]
+      // FIXME void
+      val retval = Local.gen(f.typ.returnTyp, "retval")
+      val vargs = args.map(_.valueExpr)
+      vargs.foldLeft(Block.empty)(_ ++ _.b) ++
+        new rtl.Call(f.rtlFunction, Some(retval.v),
+          (f.typ.parameters, vargs).zipped.map {
+            case (p, a) =>
+              a.convert(p.typ).expr
+          }.toIndexedSeq) ++
+        retval.ref()
     } | pos(ident) ~ ("++" | "--") ^^ { case id ~ op =>
       val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
-
-      val ve = Expr(v.typ, IndexedSeq(), rtl.Ref(v.v))
-      val one = Expr(TInt(32), IndexedSeq(), rtl.Literal(32, 1))
-      val (vep, onep) = ve.arithmeticConversion(one)
-      val sum = Expr(
-        vep.typ,
-        vep.stmts ++ onep.stmts,
-        rtl.AdditiveExpr(vep.expr, onep.expr,
-          if (op == "++") "+" else "-"))
-
-      val t = new rtl.Local(rtl.gensym("postfix"), v.typ.size)
-
-      Expr(v.typ,
-        (IndexedSeq(new rtl.Assign(t, rtl.Ref(v.v))) ++ one.stmts) :+
-          new rtl.Assign(v.v, sum.convert(v.typ).expr),
-        rtl.Ref(v.v))
+      val t = Local.gen(v.typ, "postfix")
+      t.assign(v.ref()) ++
+        v.assign(
+          v.ref().binaryArithOp(Expr.literal(Type.int, 1))((l, r) =>
+            rtl.AdditiveExpr(l, r, if (op == "++") "+" else "-"))) ++
+        t.ref()
     } |
       primary_expr(scope)
 
@@ -436,10 +602,10 @@ object Parser extends RegexParsers {
         // FIXME check
         val decl = scope.lookup(id.pos, id.value)
         val v = decl.asInstanceOf[Variable]
-        Expr(v.typ, IndexedSeq(), rtl.Ref(v.v))
+        v.ref()
       } |
       int_literal ^^ { case (size, i) =>
-        Expr(TInt(size), IndexedSeq(), rtl.Literal(size, i))
+        Expr.literal(TInt(size), i)
       }
 
   def int_literal: Parser[(Int, Int)] =
@@ -448,7 +614,7 @@ object Parser extends RegexParsers {
     } |
       "[0-9]+".r ^^ { s => (32, s.toInt) } |
       "'[^'\\\\\n]'".r ^^ { s => (8, s.apply(1).toInt) } |
-      "'\\['\\\\\"?abfnrtv]'".r ^^ { s =>
+      "'\\\\['\\\\\"?abfnrtv]'".r ^^ { s =>
         val c = s.apply(2) match {
           case '\'' => '\''
           case '\\' => '\\'
@@ -466,39 +632,41 @@ object Parser extends RegexParsers {
         (8, c.toInt)
       }
 
-  def stmt(scope: FScope): Parser[Stmts] =
+  def stmt(scope: FScope): Parser[Block] =
     ("if" ~> "(" ~> expr(scope) <~ ")") ~ stmt(scope) ~ opt("else" ~> stmt(scope)) ^^ {
       case cond ~ thenStmt ~ elseStmt =>
-        // FIXME specialize elseStmt == None
-        val Lthen = new rtl.Label(rtl.genLabel())
-        val Lelse = new rtl.Label(rtl.genLabel())
-        val Lafter = new rtl.Label(rtl.genLabel())
+        val bcond = cond.boolExpr
+        elseStmt match {
+          case Some(elseStmt) =>
+            val Lafter = new rtl.Label(rtl.genLabel())
 
-        cond.stmts ++
-          IndexedSeq(
-            new rtl.Branch(rtl.RelationalExpr(cond.expr, rtl.Literal(cond.typ.size, 0), "!=", isSigned = false),
-              Lthen, Lelse),
-            new rtl.Target(Lthen)) ++
-          thenStmt ++
-          IndexedSeq(new rtl.Goto(Lafter),
-            new rtl.Target(Lelse)) ++
-          elseStmt.getOrElse(IndexedSeq.empty) ++
-          IndexedSeq(
-            new rtl.Goto(Lafter),
-            new rtl.Target(Lafter))
+            bcond.b ++
+              bcond.trueTarget ++
+              thenStmt ++
+              new rtl.Goto(Lafter) ++
+              bcond.falseTarget ++
+              elseStmt ++
+              bcond.falseTarget
+
+          case None =>
+            bcond.b ++
+              bcond.trueTarget ++
+              thenStmt ++
+              bcond.falseTarget
+        }
     } |
       ident <~ ":" ^^ { id =>
         // FIXME check
         val label = scope.functionScope.getLabel(id)
-        IndexedSeq(new rtl.Target(label.rtlLabel))
+        new Block(new rtl.Target(label.rtlLabel))
       } |
       expr(scope) <~ ";" ^^ {
-        expr => expr.stmts
+        expr => expr.effect()
       } |
       "goto" ~> ident <~ ";" ^^ { id =>
         // FIXME check
         val label = scope.functionScope.getLabel(id)
-        IndexedSeq(new rtl.Goto(label.rtlLabel))
+        new Block(new rtl.Goto(label.rtlLabel))
       } |
       // FIXME intializer
       typ ~ pos(ident) <~ ";" ^^ { case typ ~ id =>
@@ -508,22 +676,22 @@ object Parser extends RegexParsers {
           }' may not have 'void' type")
 
         scope.declareLocal(id.pos, id.value, typ)
-        IndexedSeq()
+        Block.empty
       } |
       block_stmt(scope) |
       "return" ~> opt(expr(scope)) <~ ";" ^^ {
         case Some(e) =>
-          val c = e.convert(scope.functionScope.function.typ.returnTyp)
-          e.stmts ++
-            IndexedSeq(new rtl.Return(Some(e.expr)))
+          val c = e.convert(scope.functionScope.function.typ.returnTyp).valueExpr
+          c.b ++
+            new rtl.Return(Some(c.expr))
         case None =>
-          IndexedSeq(new rtl.Return(None))
+          new Block(new rtl.Return(None))
       }
 
-  def block_stmt(scope: FScope): Parser[Stmts] = {
+  def block_stmt(scope: FScope): Parser[Block] = {
     val bscope = new BlockScope(scope)
     "{" ~> rep(stmt(bscope)) <~ "}" ^^ {
-      _.toIndexedSeq.flatten
+      _.foldLeft(Block.empty)(_ ++ _)
     }
   }
 
@@ -547,10 +715,10 @@ object Parser extends RegexParsers {
       fileScope.declareFunction(id.pos, id.value, TFunction(returnTyp, params))
     }
 
-  def function_body(fileScope: FileScope, f: Function): Parser[Stmts] = {
+  def function_body(fileScope: FileScope, f: Function): Parser[Block] = {
     val fscope = f.functionScope(fileScope)
     "{" ~> rep(stmt(fscope)) <~ "}" ^^ {
-      _.toIndexedSeq.flatten
+      _.foldLeft(Block.empty)(_ ++ _)
     }
   }
 
@@ -559,10 +727,10 @@ object Parser extends RegexParsers {
       .flatMap { f =>
         (";" |
           function_body(fileScope, f) ^^ {
-            stmts =>
+            b =>
               f.rtlFunction.body = Some(rtl.FunctionBody(
                 IndexedSeq(),
-                stmts))
+                b.stmts))
           }) ^^ { _ => f }
       }
 

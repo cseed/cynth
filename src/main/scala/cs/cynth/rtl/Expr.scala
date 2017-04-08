@@ -230,7 +230,7 @@ class Goto(label: Label) extends Statement {
   }
 }
 
-class Target(label: Label) extends Statement {
+class Target(val label: Label) extends Statement {
   assert(label.target == null)
   label.target = this
 

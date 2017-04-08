@@ -8,12 +8,12 @@ class ParseErrorSuite extends FunSuite {
     "alphabet-goto.c",
     "empty-body.c",
     "no-return.c",
-    "hex-literal.c"
+    "hex-literal.c",
+    "char-literal.c"
   )
 
   test("valid") {
     validFiles.foreach { f =>
-      println(f)
       val cu = c.Parser.parseFile("src/test/resources/valid/" + f)
       cu.check()
     }

@@ -1,0 +1,3 @@
+char foo() {
+  return '\n';
+}

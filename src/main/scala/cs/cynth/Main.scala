@@ -11,7 +11,7 @@ import scala.io.Source
 // don't check idle in call
 // test example
 
-// full grammar of operators: prefix ++, &&, ||
+// full grammar of operators: assignment operators
 
 // remove redundant states (don't emit label, goto, make next state more sophisticated)
 
