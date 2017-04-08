@@ -83,16 +83,16 @@ object Expr {
 
 object Block {
   def empty: Block = new Block(IndexedSeq())
+
+  def apply(s: rtl.Statement): Block = Block(IndexedSeq(s))
 }
 
-class Block(val stmts: IndexedSeq[rtl.Statement]) {
-  def this(s: rtl.Statement) = this(IndexedSeq(s))
-
-  def ++(b: Block) = new Block(stmts ++ b.stmts)
+case class Block(stmts: IndexedSeq[rtl.Statement]) {
+  def ++(b: Block) = Block(stmts ++ b.stmts)
 
   def ++(e: Expr): Expr = e.prepend(this)
 
-  def ++(s: rtl.Statement) = new Block(stmts :+ s)
+  def ++(s: rtl.Statement) = Block(stmts :+ s)
 }
 
 abstract class Expr {
@@ -303,6 +303,7 @@ abstract class FScope extends Scope {
       case None =>
         val l = Local(pos, id, typ)
         decls += id -> l
+        functionScope.ab += l.v
         l
     }
   }
@@ -310,9 +311,12 @@ abstract class FScope extends Scope {
 
 class FunctionScope(val parent: FileScope,
                     val function: Function) extends FScope {
+  val ab = new mutable.ArrayBuffer[rtl.Variable]
+
   // declare parameters
   function.typ.parameters.foreach { p =>
     decls += p.id -> p
+    ab += p.v
   }
 
   val labels: mutable.Map[String, Label] = mutable.Map.empty
@@ -395,11 +399,38 @@ object Parser extends RegexParsers {
   def expr(scope: FScope): Parser[Expr] = assign_expr(scope)
 
   def assign_expr(scope: FScope): Parser[Expr] =
-    (pos(ident) <~ "=") ~ assign_expr(scope) ^^ { case id ~ e =>
+    pos(ident) ~ ("=" | "+=" | "-=" | "&=" | "^=" | "|=") ~ assign_expr(scope) ^^ { case id ~ op ~ rhs =>
       val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
-      val c = e.convert(v.typ)
-      v.assign(c) ++ v.ref()
+      if (op == "=")
+        v.assign(rhs) ++ v.ref()
+      else
+        v.assign(v.ref().binaryArithOp(rhs) { (l, r) =>
+          op match {
+            case "+=" => rtl.AdditiveExpr(l, r, "+")
+            case "-=" => rtl.AdditiveExpr(l, r, "-")
+            case "&=" => rtl.BinaryLogicalExpr(l, r, "&")
+            case "^=" => rtl.BinaryLogicalExpr(l, r, "^")
+            case "|=" => rtl.BinaryLogicalExpr(l, r, "|")
+          }
+        }) ++
+          v.ref()
     } |
+      pos(ident) ~ ("<<=" | ">>=") ~ int_literal ^^ { case id ~ op ~ rhs =>
+        val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
+        val (_, dist) = rhs
+        val lp = v.ref().integerPromotion()
+        v.assign(VExpr(lp.typ,
+          lp.b,
+          op match {
+            case "<<" => rtl.ShiftLeft(lp.expr, dist)
+            case ">>" =>
+              if (lp.typ.isSigned)
+                rtl.ShiftRightArithmetic(lp.expr, dist)
+              else
+                rtl.ShiftRightLogical(lp.expr, dist)
+          })) ++
+          v.ref()
+      } |
       cond_expr(scope)
 
   def cond_expr(scope: FScope): Parser[Expr] =
@@ -424,31 +455,33 @@ object Parser extends RegexParsers {
 
   def logical_or_expr(scope: FScope): Parser[Expr] =
     logical_and_expr(scope) ~ rep("||" ~> logical_and_expr(scope)) ^^ { case l ~ rs =>
-      rs.foldLeft(l.boolExpr) { case (l, r) =>
+      rs.foldLeft(l) { case (l, r) =>
+        val bl = l.boolExpr
         val br = r.boolExpr
         BExpr(Type.int,
-          l.b ++
-            l.falseTarget ++
+          bl.b ++
+            bl.falseTarget ++
             br.b ++
             br.trueTarget ++
-            new rtl.Goto(l.trueTarget.label),
-          l.trueTarget,
+            new rtl.Goto(bl.trueTarget.label),
+          bl.trueTarget,
           br.falseTarget)
       }
     }
 
   def logical_and_expr(scope: FScope): Parser[Expr] =
     ior_expr(scope) ~ rep("&&" ~> ior_expr(scope)) ^^ { case l ~ rs =>
-      rs.foldLeft(l.boolExpr) { case (l, r) =>
+      rs.foldLeft(l) { case (l, r) =>
+        val bl = l.boolExpr
         val br = r.boolExpr
         BExpr(Type.int,
-          l.b ++
-            l.trueTarget ++
+          bl.b ++
+            bl.trueTarget ++
             br.b ++
             br.falseTarget ++
-            new rtl.Goto(l.falseTarget.label),
+            new rtl.Goto(bl.falseTarget.label),
           br.trueTarget,
-          l.falseTarget)
+          bl.falseTarget)
       }
     }
 
@@ -533,7 +566,7 @@ object Parser extends RegexParsers {
     }
 
   def mult_expr(scope: FScope): Parser[Expr] =
-    unary_expr(scope)
+    cast_expr(scope)
 
   def cast_expr(scope: FScope): Parser[Expr] =
     unary_expr(scope) |
@@ -546,7 +579,7 @@ object Parser extends RegexParsers {
       val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
       v.assign(
         v.ref().binaryArithOp(Expr.literal(Type.int, 1))((l, r) =>
-          rtl.AdditiveExpr(l, r, op))) ++
+          rtl.AdditiveExpr(l, r, if (op == "++") "+" else "-"))) ++
         v.ref()
     } |
       ("-" | "+" | "~" | "!") ~ cast_expr(scope) ^^ { case op ~ e =>
@@ -634,9 +667,9 @@ object Parser extends RegexParsers {
 
   def stmt(scope: FScope): Parser[Block] =
     ("if" ~> "(" ~> expr(scope) <~ ")") ~ stmt(scope) ~ opt("else" ~> stmt(scope)) ^^ {
-      case cond ~ thenStmt ~ elseStmt =>
+      case cond ~ thenStmt ~ elseStmtOpt =>
         val bcond = cond.boolExpr
-        elseStmt match {
+        elseStmtOpt match {
           case Some(elseStmt) =>
             val Lafter = new rtl.Label(rtl.genLabel())
 
@@ -646,19 +679,42 @@ object Parser extends RegexParsers {
               new rtl.Goto(Lafter) ++
               bcond.falseTarget ++
               elseStmt ++
-              bcond.falseTarget
+              // fall through
+              new rtl.Target(Lafter)
 
           case None =>
             bcond.b ++
               bcond.trueTarget ++
               thenStmt ++
+              // fall through
               bcond.falseTarget
         }
     } |
+      ((("while" ~ "(") ~> expr(scope)) <~ ")") ~ stmt(scope) ^^ { case cond ~ stmt =>
+        val Lwhile = new rtl.Label(rtl.genLabel())
+        val bcond = cond.boolExpr
+        Block(new rtl.Target(Lwhile)) ++ // FIXME
+          bcond.b ++
+          bcond.trueTarget ++
+          stmt ++
+          new rtl.Goto(Lwhile) ++
+          bcond.falseTarget
+      } |
+      ("do" ~> stmt(scope)) ~ (("while" ~ "(") ~> expr(scope) <~ ")") ^^ { case stmt ~ cond =>
+        val Ldo = new rtl.Label(rtl.genLabel())
+        val bcond = cond.boolExpr
+
+        Block(new rtl.Target(Ldo)) ++
+          stmt ++
+          bcond.b ++
+          bcond.trueTarget ++
+          new rtl.Goto(Ldo) ++
+          bcond.falseTarget
+      } |
       ident <~ ":" ^^ { id =>
         // FIXME check
         val label = scope.functionScope.getLabel(id)
-        new Block(new rtl.Target(label.rtlLabel))
+        Block(new rtl.Target(label.rtlLabel))
       } |
       expr(scope) <~ ";" ^^ {
         expr => expr.effect()
@@ -666,17 +722,17 @@ object Parser extends RegexParsers {
       "goto" ~> ident <~ ";" ^^ { id =>
         // FIXME check
         val label = scope.functionScope.getLabel(id)
-        new Block(new rtl.Goto(label.rtlLabel))
+        Block(new rtl.Goto(label.rtlLabel))
       } |
       // FIXME intializer
-      typ ~ pos(ident) <~ ";" ^^ { case typ ~ id =>
+      typ ~ pos(ident) ~ (opt("=" ~> expr(scope)) <~ ";") ^^ { case typ ~ id ~ initopt =>
         if (typ == TVoid)
           id.pos.parseError(s"variable '${
             id.value
           }' may not have 'void' type")
 
-        scope.declareLocal(id.pos, id.value, typ)
-        Block.empty
+        val v = scope.declareLocal(id.pos, id.value, typ)
+        initopt.map(init => v.assign(init)).getOrElse(Block.empty)
       } |
       block_stmt(scope) |
       "return" ~> opt(expr(scope)) <~ ";" ^^ {
@@ -685,7 +741,7 @@ object Parser extends RegexParsers {
           c.b ++
             new rtl.Return(Some(c.expr))
         case None =>
-          new Block(new rtl.Return(None))
+          Block(new rtl.Return(None))
       }
 
   def block_stmt(scope: FScope): Parser[Block] = {
@@ -715,10 +771,10 @@ object Parser extends RegexParsers {
       fileScope.declareFunction(id.pos, id.value, TFunction(returnTyp, params))
     }
 
-  def function_body(fileScope: FileScope, f: Function): Parser[Block] = {
+  def function_body(fileScope: FileScope, f: Function): Parser[(IndexedSeq[rtl.Variable], Block)] = {
     val fscope = f.functionScope(fileScope)
-    "{" ~> rep(stmt(fscope)) <~ "}" ^^ {
-      _.foldLeft(Block.empty)(_ ++ _)
+    "{" ~> rep(stmt(fscope)) <~ "}" ^^ { stmts =>
+      (fscope.ab, stmts.foldLeft(Block.empty)(_ ++ _))
     }
   }
 
@@ -726,10 +782,9 @@ object Parser extends RegexParsers {
     function_head(fileScope)
       .flatMap { f =>
         (";" |
-          function_body(fileScope, f) ^^ {
-            b =>
+          function_body(fileScope, f) ^^ { case (vars, b) =>
               f.rtlFunction.body = Some(rtl.FunctionBody(
-                IndexedSeq(),
+                vars,
                 b.stmts))
           }) ^^ { _ => f }
       }

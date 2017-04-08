@@ -1,3 +1,3 @@
-char foo() {
-  return '\n';
+int foo() {
+  return (int)'\n';
 }

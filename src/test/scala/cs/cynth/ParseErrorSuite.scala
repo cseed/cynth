@@ -9,7 +9,9 @@ class ParseErrorSuite extends FunSuite {
     "empty-body.c",
     "no-return.c",
     "hex-literal.c",
-    "char-literal.c"
+    "char-literal.c",
+    "assign.c",
+    "uart.c"
   )
 
   test("valid") {

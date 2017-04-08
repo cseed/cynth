@@ -137,7 +137,7 @@ case class SignExtend(size: Int, child: Expr) extends UnaryExpr {
     assert(child.size < size)
   }
 
-  override def toString = s"{${size - child.size}{$child[${child.size - 1}]}, $child}"
+  override def toString = s"{${size - child.size}{($child)[${child.size - 1}]}, $child}"
 }
 
 case class ZeroExtend(size: Int, child: Expr) extends UnaryExpr {
@@ -146,7 +146,7 @@ case class ZeroExtend(size: Int, child: Expr) extends UnaryExpr {
     assert(child.size < size)
   }
 
-  override def toString = s"${size - child.size}'d0, ($child)}"
+  override def toString = s"{${size - child.size}'d0, ($child)}"
 }
 
 case class Truncate(size: Int, child: Expr) extends UnaryExpr {
@@ -264,9 +264,9 @@ class Branch(cond: Expr, thenLabel: Label, elseLabel: Label) extends Statement {
 
   override def emitBody(b: FunctionBody, next: Int): Unit = {
     println(s"          if ($cond)")
-    println(s"            __state <= ${thenLabel.target.id}")
+    println(s"            __state <= ${thenLabel.target.id};")
     println("          else")
-    println(s"            __state <= ${elseLabel.target.id}")
+    println(s"            __state <= ${elseLabel.target.id};")
   }
 }
 
@@ -398,10 +398,10 @@ case class FunctionBody(variables: IndexedSeq[Variable],
     }
 
     if (f.returnSize > 0)
-      println(s"  output [${f.returnSize - 1}:0] __retval,")
+      println(s"  output reg [${f.returnSize - 1}:0] __retval,")
 
     println("  input __start,")
-    println("  output __idle);")
+    println("  output __idle,")
     println("  output __valid);")
 
     println("  reg [31:0] __state;")
@@ -417,11 +417,11 @@ case class FunctionBody(variables: IndexedSeq[Variable],
       .filter(f => f.body.isDefined)
       .foreach(_.emitInstance(true))
 
-    println("  always @(posedge clk) begin")
-    println("    if (!resetn) begin")
+    println("  always @(posedge __clk) begin")
+    println("    if (!__resetn) begin")
     println(s"      __state <= $idleState;")
     println("    end else begin")
-    println("      case (state)")
+    println("      case (__state)")
     println(s"        $idleState : begin")
     println("          if (__start)")
     println(s"            __state <= $initialState;")
