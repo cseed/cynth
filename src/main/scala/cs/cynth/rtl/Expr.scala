@@ -1,5 +1,7 @@
 package cs.cynth.rtl
 
+import java.io.PrintStream
+
 sealed abstract class Expr {
   def size: Int
 
@@ -187,13 +189,13 @@ sealed abstract class Statement {
 
   def pretty(): Unit
 
-  def emit(b: FunctionBody, next: Int): Unit = {
-    println(s"        $id : begin")
-    emitBody(b, next)
-    println("        end")
+  def emit(out: PrintStream, b: FunctionBody, next: Int): Unit = {
+    out.println(s"        $id : begin")
+    emitBody(out: PrintStream, b, next)
+    out.println("        end")
   }
 
-  def emitBody(b: FunctionBody, next: Int): Unit =
+  def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit =
     throw new UnsupportedOperationException
 }
 
@@ -209,9 +211,9 @@ class Assign(v: Variable, expr: Expr) extends Statement {
     println(";")
   }
 
-  override def emitBody(b: FunctionBody, next: Int): Unit = {
-    println(s"          ${v.id} <= $expr;")
-    println(s"          __state <= $next;")
+  override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
+    out.println(s"          ${v.id} <= $expr;")
+    out.println(s"          __state <= $next;")
   }
 
 }
@@ -221,8 +223,8 @@ class Label(val id: String, var target: Target) {
 }
 
 class Goto(label: Label) extends Statement {
-  override def emitBody(b: FunctionBody, next: Int): Unit = {
-    println(s"          __state <= ${label.target.id};")
+  override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
+    out.println(s"          __state <= ${label.target.id};")
   }
 
   def pretty(): Unit = {
@@ -242,8 +244,8 @@ class Target(val label: Label) extends Statement {
     println(s" ${label.id}:")
   }
 
-  override def emitBody(b: FunctionBody, next: Int): Unit = {
-    println(s"          __state <= $next;")
+  override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
+    out.println(s"          __state <= $next;")
   }
 }
 
@@ -262,11 +264,11 @@ class Branch(cond: Expr, thenLabel: Label, elseLabel: Label) extends Statement {
     println(s"    goto ${elseLabel.id};")
   }
 
-  override def emitBody(b: FunctionBody, next: Int): Unit = {
-    println(s"          if ($cond)")
-    println(s"            __state <= ${thenLabel.target.id};")
-    println("          else")
-    println(s"            __state <= ${elseLabel.target.id};")
+  override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
+    out.println(s"          if ($cond)")
+    out.println(s"            __state <= ${thenLabel.target.id};")
+    out.println("          else")
+    out.println(s"            __state <= ${elseLabel.target.id};")
   }
 }
 
@@ -296,31 +298,31 @@ class Call(val target: Function,
     println(");")
   }
 
-  override def emit(b: FunctionBody, next: Int): Unit = {
+  override def emit(out: PrintStream, b: FunctionBody, next: Int): Unit = {
     val validState = Statement.newId()
 
-    println(s"        $id : begin")
+    out.println(s"        $id : begin")
 
-    println(s"          if (__idle_${target.id}) begin")
-    println(s"            __start_${target.id} <= 1;")
+    out.println(s"          if (__idle_${target.id}) begin")
+    out.println(s"            __start_${target.id} <= 1;")
 
     (target.parameters, arguments).zipped.foreach { (p, a) =>
-      println(s"            __p_${p.id}_${target.id} <= $a;")
+      out.println(s"            __p_${p.id}_${target.id} <= $a;")
     }
 
-    println(s"            __state <= $validState;")
-    println("          end")
-    println("        end")
+    out.println(s"            __state <= $validState;")
+    out.println("          end")
+    out.println("        end")
 
-    println(s"        $validState : begin")
-    println(s"          __start_${target.id} <= 0;")
-    println(s"          if (__valid_${target.id}) begin")
+    out.println(s"        $validState : begin")
+    out.println(s"          __start_${target.id} <= 0;")
+    out.println(s"          if (__valid_${target.id}) begin")
     returnVariable.foreach { v =>
-      println(s"            ${v.id} <= __retval_${target.id};")
+      out.println(s"            ${v.id} <= __retval_${target.id};")
     }
-    println(s"            __state <= $next;")
-    println(s"          end")
-    println("        end")
+    out.println(s"            __state <= $next;")
+    out.println(s"          end")
+    out.println("        end")
   }
 }
 
@@ -338,12 +340,12 @@ class Return(expr: Option[Expr]) extends Statement {
     println(";")
   }
 
-  override def emitBody(b: FunctionBody, next: Int): Unit = {
+  override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
     expr.foreach { e =>
-      println(s"          __retval <= $e;")
+      out.println(s"          __retval <= $e;")
     }
 
-    println(s"          __state <= ${b.returnState};")
+    out.println(s"          __state <= ${b.returnState};")
   }
 }
 
@@ -359,7 +361,7 @@ case class FunctionBody(variables: IndexedSeq[Variable],
     stmts.foreach(_.check(f))
   }
 
-  def emit(f: Function): Unit = {
+  def emit(out: PrintStream, f: Function): Unit = {
 
     val targets: Set[Function] =
       stmts.flatMap {
@@ -370,65 +372,65 @@ case class FunctionBody(variables: IndexedSeq[Variable],
 
     val externTargets = targets.filter(f => f.body.isEmpty)
 
-    println(s"module ${f.id}(")
-    println("  input __clk,")
-    println("  input __resetn,")
+    out.println(s"module ${f.id}(")
+    out.println("  input __clk,")
+    out.println("  input __resetn,")
 
     externTargets
       .foreach { f =>
-        println("")
-        println(s"  // ${f.id} interface")
+        out.println("")
+        out.println(s"  // ${f.id} interface")
 
         f.parameters.foreach { p =>
-          println(s"  output reg [${p.size - 1}:0] __p_${p.id}_${f.id},")
+          out.println(s"  output reg [${p.size - 1}:0] __p_${p.id}_${f.id},")
         }
 
         if (f.returnSize > 0)
-          println(s"  wire [${f.returnSize - 1}:0] __retval_${f.id},")
+          out.println(s"  wire [${f.returnSize - 1}:0] __retval_${f.id},")
 
-        println(s"  output reg __start_${f.id},")
-        println(s"  input __idle_${f.id},")
-        println(s"  input __valid_${f.id},")
+        out.println(s"  output reg __start_${f.id},")
+        out.println(s"  input __idle_${f.id},")
+        out.println(s"  input __valid_${f.id},")
 
-        println("")
+        out.println("")
       }
 
     f.parameters.foreach { p =>
-      println(s"  input [${p.size - 1}:0] __p_${p.id},")
+      out.println(s"  input [${p.size - 1}:0] __p_${p.id},")
     }
 
     if (f.returnSize > 0)
-      println(s"  output reg [${f.returnSize - 1}:0] __retval,")
+      out.println(s"  output reg [${f.returnSize - 1}:0] __retval,")
 
-    println("  input __start,")
-    println("  output __idle,")
-    println("  output __valid);")
+    out.println("  input __start,")
+    out.println("  output __idle,")
+    out.println("  output __valid);")
 
-    println("  reg [31:0] __state;")
+    out.println("  reg [31:0] __state;")
 
     variables.foreach { v =>
-      println(s"  reg [${v.size - 1}:0] ${v.id};")
+      out.println(s"  reg [${v.size - 1}:0] ${v.id};")
     }
 
-    println(s"  assign __idle = (__state == $idleState);")
-    println(s"  assign __valid = (__state == $returnState);")
+    out.println(s"  assign __idle = (__state == $idleState);")
+    out.println(s"  assign __valid = (__state == $returnState);")
 
     targets
       .filter(f => f.body.isDefined)
       .foreach(_.emitInstance(true))
 
-    println("  always @(posedge __clk) begin")
-    println("    if (!__resetn) begin")
-    println(s"      __state <= $idleState;")
-    println("    end else begin")
-    println("      case (__state)")
-    println(s"        $idleState : begin")
-    println("          if (__start)")
-    println(s"            __state <= $initialState;")
+    out.println("  always @(posedge __clk) begin")
+    out.println("    if (!__resetn) begin")
+    out.println(s"      __state <= $idleState;")
+    out.println("    end else begin")
+    out.println("      case (__state)")
+    out.println(s"        $idleState : begin")
+    out.println("          if (__start)")
+    out.println(s"            __state <= $initialState;")
     f.parameters.foreach { p =>
-      println(s"            ${p.id} <= __p_${p.id};")
+      out.println(s"            ${p.id} <= __p_${p.id};")
     }
-    println("        end")
+    out.println("        end")
 
     stmts.zipWithIndex.foreach { case (s, i) =>
       val next =
@@ -437,69 +439,69 @@ case class FunctionBody(variables: IndexedSeq[Variable],
         else
           returnState
 
-      s.emit(this, next)
+      s.emit(out, this, next)
     }
 
-    println(s"        $returnState : begin")
-    println(s"          __state <= $idleState;")
-    println("        end")
+    out.println(s"        $returnState : begin")
+    out.println(s"          __state <= $idleState;")
+    out.println("        end")
 
-    println("      endcase")
-    println("    end")
-    println("  end")
+    out.println("      endcase")
+    out.println("    end")
+    out.println("  end")
 
-    println("")
+    out.println("")
 
-    println("endmodule")
+    out.println("endmodule")
 
     if (externTargets.nonEmpty) {
-      println(s"module ${f.id}_top_template(")
-      println("  input __clk,")
-      println("  input __resetn,")
+      out.println(s"module ${f.id}_top_template(")
+      out.println("  input __clk,")
+      out.println("  input __resetn,")
 
       f.parameters.foreach { p =>
-        println(s"  input [${p.size - 1}:0] __p_${p.id},")
+        out.println(s"  input [${p.size - 1}:0] __p_${p.id},")
       }
 
       if (f.returnSize > 0)
-        println(s"  output [${f.returnSize - 1}:0] __retval,")
+        out.println(s"  output [${f.returnSize - 1}:0] __retval,")
 
-      println("  input __start,")
-      println("  output __idle);")
-      println("  output __valid);")
+      out.println("  input __start,")
+      out.println("  output __idle);")
+      out.println("  output __valid);")
 
       externTargets.foreach(_.emitInstance(false))
 
-      println(s"  ${f.id} ${f.id}_inst(")
-      println("    .__clk(__clk),")
-      println("    .__resetn(__resetn),")
+      out.println(s"  ${f.id} ${f.id}_inst(")
+      out.println("    .__clk(__clk),")
+      out.println("    .__resetn(__resetn),")
 
       externTargets.foreach { f =>
         f.parameters.foreach { p =>
-          println(s"    .__p_${p.id}_${f.id}(__p_${p.id}_${f.id}),")
+          out.println(s"    .__p_${p.id}_${f.id}(__p_${p.id}_${f.id}),")
         }
 
         if (f.returnSize > 0)
-          println(s"    .__retval_${f.id}(__retval_${f.id}),")
+          out.println(s"    .__retval_${f.id}(__retval_${f.id}),")
 
-        println(s"    .__start_${f.id}(__start_${f.id}),")
-        println(s"    .__idle_${f.id}(__idle_${f.id}),")
-        println(s"    .__valid_${f.id}(__valid_${f.id}),")
+        out.println(s"    .__start_${f.id}(__start_${f.id}),")
+        out.println(s"    .__idle_${f.id}(__idle_${f.id}),")
+        out.println(s"    .__valid_${f.id}(__valid_${f.id}),")
       }
 
       f.parameters.foreach { p =>
-        println(s"    .__p_${p.id}(__p_${p.id}),")
+        out.println(s"    .__p_${p.id}(__p_${p.id}),")
       }
 
       if (f.returnSize > 0)
-        println(s"    .__reval(__reval),")
+        out.println(s"    .__reval(__reval),")
 
-      println("    .__start(__start),")
-      println("    .__idle(__idle),")
-      println("    .__valid(__valid));")
+      out.println("    .__start(__start),")
+      out.println("    .__idle(__idle),")
+      out.println("    .__valid(__valid));")
 
-      println("")
-      println("endmodule")
+      out.println("")
+      out.println("endmodule")
     }
   }
 }
@@ -529,7 +531,7 @@ case class Function(id: String,
 
   }
 
-  def emit(): Unit = body.foreach(_.emit(this))
+  def emit(out: PrintStream): Unit = body.foreach(_.emit(out, this))
 
   def emitInstance(reg: Boolean): Unit = {
     println("")
@@ -613,7 +615,7 @@ object CompilationUnit {
 case class CompilationUnit(functions: Seq[Function]) {
   def check(): Unit = functions.foreach(_.check())
 
-  def emit(): Unit = functions.foreach(_.emit())
+  def emit(out: PrintStream): Unit = functions.foreach(_.emit(out))
 
   def pretty(): Unit = functions.foreach(_.pretty())
 }

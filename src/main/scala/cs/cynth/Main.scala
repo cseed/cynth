@@ -1,9 +1,9 @@
 package cs.cynth
 
-import java.io.{File, FileWriter}
+import java.io._
 
-import scala.collection.mutable.ArrayBuffer
-import scala.io.Source
+import scala.sys.process._
+import scala.language.postfixOps
 
 // TODO:
 // write write_uart in Verilog
@@ -11,7 +11,8 @@ import scala.io.Source
 // don't check idle in call
 // test example
 
-// make test benches for examples
+// fix FIXMEs
+// check for label with no definition
 
 // statements: for
 
@@ -24,23 +25,26 @@ import scala.io.Source
 object Main {
 
   def main(args: Array[String]): Unit = {
-    val text = """int f() {
+    val text = """
+// expected: 32'd10
+int f() {
   int i = 0;
   int s = 0;
-  while (i < 3) {
+  while (i < 5) {
     s += i;
     ++i;
   }
   return s;
 }
 """
-    val cu = c.Parser.parseString(text)
 
-    // val cu = c.Parser.parseFile("src/test/resources/valid/uart.c")
+    // val cu = c.Parser.parseString(text)
+
+    val cu = c.Parser.parseFile("src/test/resources/parse-error/label-redefinition.c")
     cu.check()
 
     cu.pretty()
 
-    cu.emit()
+    cu.emit(System.out)
   }
 }

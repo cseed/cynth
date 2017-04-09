@@ -5,6 +5,7 @@ import java.io.FileReader
 import cs.cynth.rtl
 
 import scala.collection.mutable
+import scala.util.matching.Regex
 import scala.util.parsing.combinator.RegexParsers
 import scala.util.parsing.input.{Position, Positional}
 
@@ -261,6 +262,8 @@ case class Function(pos: Position, id: String, typ: TFunction) extends Decl {
 
 class Label(id: String) {
   val rtlLabel: rtl.Label = new rtl.Label(id)
+
+  var definitionPos: Position = _
 }
 
 abstract class Scope {
@@ -343,6 +346,8 @@ case class Positioned[T](value: T) extends Positional {
 }
 
 object Parser extends RegexParsers {
+  override val whiteSpace: Regex = "\\s*//[^\n]*\\s*|\\s+".r
+
   var file: String = "<input>"
 
   def parseError(msg: String): Nothing = throw new ParseError(msg)
@@ -385,7 +390,6 @@ object Parser extends RegexParsers {
       "int" ^^ { _ => Type.int } |
       "unsigned" ^^ { _ => Type.unsigned } |
       "long" ^^ { _ => Type.long } |
-      // FIXME _Bool type?
       "_Bool" ^^ { _ => Type.bool } |
       "void" ^^ { _ => TVoid }
 
@@ -606,18 +610,27 @@ object Parser extends RegexParsers {
 
   def postfix_expr(scope: FScope): Parser[Expr] =
     (pos(ident) <~ "(") ~ repsep(expr(scope), ",") <~ ")" ^^ { case id ~ args =>
-      // FIXME check
-      val f = scope.lookup(id.pos, id.value).asInstanceOf[Function]
-      // FIXME void
-      val retval = Local.gen(f.typ.returnTyp, "retval")
+      val f = scope.lookup(id.pos, id.value) match {
+        case f: Function => f
+        case _ =>
+          id.error(s"called object '${id.value}' is not function")
+      }
+      val retval = f.typ.returnTyp match {
+        case TVoid => None
+        case _ => Some(Local.gen(f.typ.returnTyp, "retval"))
+      }
       val vargs = args.map(_.valueExpr)
-      vargs.foldLeft(Block.empty)(_ ++ _.b) ++
-        new rtl.Call(f.rtlFunction, Some(retval.v),
+      val b = vargs.foldLeft(Block.empty)(_ ++ _.b) ++
+        new rtl.Call(f.rtlFunction, retval.map(_.v),
           (f.typ.parameters, vargs).zipped.map {
             case (p, a) =>
               a.convert(p.typ).expr
-          }.toIndexedSeq) ++
-        retval.ref()
+          }.toIndexedSeq)
+
+      retval match {
+        case None => VExpr(TVoid, b, null)
+        case Some(v) => b ++ v.ref()
+      }
     } | pos(ident) ~ ("++" | "--") ^^ { case id ~ op =>
       val v = scope.lookup(id.pos, id.value).asInstanceOf[Variable]
       val t = Local.gen(v.typ, "postfix")
@@ -632,9 +645,11 @@ object Parser extends RegexParsers {
   def primary_expr(scope: FScope): Parser[Expr] =
     "(" ~> expr(scope) <~ ")" |
       pos(ident) ^^ { id =>
-        // FIXME check
-        val decl = scope.lookup(id.pos, id.value)
-        val v = decl.asInstanceOf[Variable]
+        val v = scope.lookup(id.pos, id.value) match {
+          case v: Variable => v
+          case _ =>
+            id.error(s"non-variable '${id.value}' expression scope")
+        }
         v.ref()
       } |
       int_literal ^^ { case (size, i) =>
@@ -693,7 +708,7 @@ object Parser extends RegexParsers {
       ((("while" ~ "(") ~> expr(scope)) <~ ")") ~ stmt(scope) ^^ { case cond ~ stmt =>
         val Lwhile = new rtl.Label(rtl.genLabel())
         val bcond = cond.boolExpr
-        Block(new rtl.Target(Lwhile)) ++ // FIXME
+        Block(new rtl.Target(Lwhile)) ++
           bcond.b ++
           bcond.trueTarget ++
           stmt ++
@@ -711,20 +726,25 @@ object Parser extends RegexParsers {
           new rtl.Goto(Ldo) ++
           bcond.falseTarget
       } |
-      ident <~ ":" ^^ { id =>
-        // FIXME check
-        val label = scope.functionScope.getLabel(id)
+      pos(ident) <~ ":" ^^ { id =>
+        val label = scope.functionScope.getLabel(id.value)
+        if (label.definitionPos != null) {
+          parseError(
+            id.pos.fmt(s"redefinition of label '${id.value}'") +
+              label.definitionPos.fmt("previous definition is here", level = "note"))
+        }
+
+        label.definitionPos = id.pos
+
         Block(new rtl.Target(label.rtlLabel))
       } |
       expr(scope) <~ ";" ^^ {
         expr => expr.effect()
       } |
       "goto" ~> ident <~ ";" ^^ { id =>
-        // FIXME check
         val label = scope.functionScope.getLabel(id)
         Block(new rtl.Goto(label.rtlLabel))
       } |
-      // FIXME intializer
       typ ~ pos(ident) ~ (opt("=" ~> expr(scope)) <~ ";") ^^ { case typ ~ id ~ initopt =>
         if (typ == TVoid)
           id.pos.parseError(s"variable '${
@@ -783,9 +803,9 @@ object Parser extends RegexParsers {
       .flatMap { f =>
         (";" |
           function_body(fileScope, f) ^^ { case (vars, b) =>
-              f.rtlFunction.body = Some(rtl.FunctionBody(
-                vars,
-                b.stmts))
+            f.rtlFunction.body = Some(rtl.FunctionBody(
+              vars,
+              b.stmts))
           }) ^^ { _ => f }
       }
 
