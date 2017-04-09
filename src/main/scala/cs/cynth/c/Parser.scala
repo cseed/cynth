@@ -21,7 +21,11 @@ ${lineContents.take(pos.column - 1).map { c => if (c == '\t') c else ' ' }}^
 """
   }
 
-  def parseError(msg: String): Nothing = Parser.parseError(fmt(msg))
+  def error(msg: String): Nothing = Parser.error(fmt(msg))
+
+  def warning(msg: String): Unit = {
+    System.err.println(fmt(msg, level = "warning"))
+  }
 }
 
 object Type {
@@ -35,6 +39,146 @@ object Type {
   val unsigned: Type = TUInt(32)
   val long: Type = TInt(64)
   val unsignedLong: Type = TUInt(64)
+  val longLong: Type = TInt(64)
+  val unsignedLongLong: Type = TUInt(64)
+}
+
+sealed abstract class DeclSpec {
+  def isConcreteTypeSpecifier: Boolean
+}
+
+object DeclSpec {
+
+  case object Bool extends DeclSpec {
+    override def toString: String = "_Bool"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object Void extends DeclSpec {
+    override def toString: String = "void"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object Char extends DeclSpec {
+    override def toString: String = "char"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object Short extends DeclSpec {
+    override def toString: String = "short"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object Int extends DeclSpec {
+    override def toString: String = "int"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object Long extends DeclSpec {
+    override def toString: String = "long"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object LongLong extends DeclSpec {
+    override def toString: String = "long long"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case class SizedInt(size: Int) extends DeclSpec {
+    override def toString: String = s"__int$size"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  case object Signed extends DeclSpec {
+    override def toString: String = "signed"
+
+    def isConcreteTypeSpecifier: Boolean = false
+  }
+
+  case object Unsigned extends DeclSpec {
+    override def toString: String = "unsigned"
+
+    def isConcreteTypeSpecifier: Boolean = false
+  }
+
+  case object Nonstd extends DeclSpec {
+    override def toString: String = "__nonstd"
+
+    def isConcreteTypeSpecifier: Boolean = true
+  }
+
+  def merge(specs: List[DeclSpec], posSpec: Positioned[DeclSpec]): List[DeclSpec] = {
+    val pos = posSpec.pos
+    val spec = posSpec.value
+
+    def f(specs: List[DeclSpec]): List[DeclSpec] = specs match {
+      case hd :: tl =>
+        if (hd == DeclSpec.Long && spec == DeclSpec.Long)
+          DeclSpec.LongLong :: tl
+        else {
+          if ((hd.isConcreteTypeSpecifier && spec.isConcreteTypeSpecifier) ||
+            (hd == DeclSpec.Signed && spec == DeclSpec.Unsigned) ||
+            (hd == DeclSpec.Unsigned && spec == DeclSpec.Signed))
+            posSpec.error(s"cannot combine '$spec' with previous '$hd' declaration specifier")
+
+          if (hd == spec) {
+            posSpec.warning(s"duplicate '$spec' declaration specifier")
+            tl
+          } else
+            hd :: f(tl)
+        }
+
+      case Nil => List(spec)
+    }
+
+    f(specs)
+  }
+
+  def isNonstd(specs: List[DeclSpec]): Boolean = specs.contains(DeclSpec.Nonstd)
+
+  def typ(pos: Position, specs: List[DeclSpec]): Type = {
+    val isUnsigned = specs.contains(DeclSpec.Unsigned)
+    val isSigned = specs.contains(DeclSpec.Signed)
+
+    def f(specs: List[DeclSpec]): Type = specs match {
+      case hd :: tl => hd match {
+        case DeclSpec.Void => TVoid
+        case DeclSpec.Bool => Type.bool
+        case DeclSpec.Char =>
+          if (isUnsigned)
+            Type.unsignedChar
+          else if (isSigned)
+            Type.signedChar
+          else
+            Type.char
+        case DeclSpec.Short => if (isUnsigned) Type.unsignedShort else Type.short
+        case DeclSpec.Int => if (isUnsigned) Type.unsigned else Type.int
+        case DeclSpec.Long => if (isUnsigned) Type.unsignedLong else Type.long
+        case DeclSpec.LongLong => if (isUnsigned) Type.unsignedLongLong else Type.longLong
+        case DeclSpec.SizedInt(size) => if (isUnsigned) TUInt(size) else TInt(size)
+        case _ => f(tl)
+      }
+
+      case Nil =>
+        if (isUnsigned)
+          Type.unsigned
+        else {
+          if (!isSigned)
+            pos.warning("type specifier missing, defaulting to 'int'")
+          Type.int
+        }
+    }
+
+    f(specs)
+  }
 }
 
 sealed abstract class Type {
@@ -210,11 +354,11 @@ sealed abstract class Decl {
   def id: String
 
   def typ: Type
-
 }
 
-// FIXME Variable shouldn't extend Decl, mix into Local, Parameter
-abstract class Variable extends Decl {
+trait Variable {
+  def typ: Type
+
   val v: rtl.Variable
 
   def assign(e: Expr): Block = {
@@ -227,41 +371,38 @@ abstract class Variable extends Decl {
 
 object Local {
   def gen(vtyp: Type, root: String): Variable = {
-    val vid = rtl.gensym(root)
     new Variable {
-      def pos: Position = ???
-
-      def id: String = vid
-
       def typ: Type = vtyp
 
-      val v = new rtl.Local(id, vtyp.size)
+      val v: rtl.Variable = new rtl.Local(rtl.gensym(root), vtyp.size)
     }
   }
 }
 
-case class Local(pos: Position, id: String, typ: Type) extends Variable {
+case class Local(pos: Position, id: String, typ: Type) extends Decl with Variable {
   val v = new rtl.Local(id, typ.size)
 }
 
-case class Parameter(pos: Position, id: String, typ: Type) extends Variable {
+case class Parameter(pos: Position, id: String, typ: Type) extends Decl with Variable {
   val v = new rtl.Parameter(id, typ.size)
 }
 
-case class Function(pos: Position, id: String, typ: TFunction) extends Decl {
-
+case class Function(pos: Position, id: String, typ: TFunction, nonstd: Boolean) extends Decl {
   val rtlFunction: rtl.Function =
     rtl.Function(id,
       typ.returnTyp.size,
       typ.parameters.map(_.v),
+      nonstd,
       None)
 
   def functionScope(parent: FileScope): FunctionScope =
     new FunctionScope(parent, this)
 }
 
-class Label(id: String) {
+class Label(val id: String) {
   val rtlLabel: rtl.Label = new rtl.Label(id)
+
+  var usePos: Position = _
 
   var definitionPos: Position = _
 }
@@ -278,7 +419,7 @@ abstract class Scope {
         if (parent != null)
           parent.lookup(pos, id)
         else
-          pos.parseError(s"use of undeclared identifier '$id'")
+          pos.error(s"use of undeclared identifier '$id'")
     }
   }
 }
@@ -286,8 +427,8 @@ abstract class Scope {
 class FileScope extends Scope {
   def parent: Scope = null
 
-  def declareFunction(pos: Position, id: String, typ: TFunction): Function = {
-    val f = Function(pos, id, typ)
+  def declareFunction(pos: Position, id: String, typ: TFunction, nonstd: Boolean): Function = {
+    val f = Function(pos, id, typ, nonstd)
     decls += id -> f
     f
   }
@@ -299,14 +440,13 @@ abstract class FScope extends Scope {
   def declareLocal(pos: Position, id: String, typ: Type): Local = {
     decls.get(id) match {
       case Some(decl) =>
-        Parser.parseError(
+        Parser.error(
           pos.fmt(s"redefinition of '$id'") +
             decl.pos.fmt("previous definition is here", level = "note"))
 
       case None =>
         val l = Local(pos, id, typ)
         decls += id -> l
-        functionScope.ab += l.v
         l
     }
   }
@@ -314,12 +454,9 @@ abstract class FScope extends Scope {
 
 class FunctionScope(val parent: FileScope,
                     val function: Function) extends FScope {
-  val ab = new mutable.ArrayBuffer[rtl.Variable]
-
   // declare parameters
   function.typ.parameters.foreach { p =>
     decls += p.id -> p
-    ab += p.v
   }
 
   val labels: mutable.Map[String, Label] = mutable.Map.empty
@@ -341,8 +478,10 @@ class BlockScope(val parent: FScope) extends FScope {
   def functionScope: FunctionScope = parent.functionScope
 }
 
-case class Positioned[T](value: T) extends Positional {
-  def error(msg: String): Nothing = pos.parseError(msg)
+case class Positioned[+T](value: T) extends Positional {
+  def error(msg: String): Nothing = pos.error(msg)
+
+  def warning(msg: String): Unit = pos.warning(msg)
 }
 
 object Parser extends RegexParsers {
@@ -350,7 +489,7 @@ object Parser extends RegexParsers {
 
   var file: String = "<input>"
 
-  def parseError(msg: String): Nothing = throw new ParseError(msg)
+  def error(msg: String): Nothing = throw new ParseError(msg)
 
   def parseString(input: String): rtl.CompilationUnit = {
     file = "<input>"
@@ -368,7 +507,7 @@ object Parser extends RegexParsers {
     parseAll(compilation_unit, new FileReader(f)) match {
       case Success(result, _) => result
       case NoSuccess(msg, next) =>
-        next.pos.parseError(msg)
+        next.pos.error(msg)
     }
   }
 
@@ -381,24 +520,32 @@ object Parser extends RegexParsers {
     "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile",
     "while", "_Bool", "_Complex", "_Imaginary")
 
-  // FIXME standard C types
-  def typ: Parser[Type] =
-    "int[0-9]+".r ^^ { s => TInt(s.drop(3).toInt) } |
-      "uint[0-9]+".r ^^ { s => TUInt(s.drop(4).toInt) } |
-      "char" ^^ { _ => Type.char } |
-      "short" ^^ { _ => Type.short } |
-      "int" ^^ { _ => Type.int } |
-      "unsigned" ^^ { _ => Type.unsigned } |
-      "long" ^^ { _ => Type.long } |
-      "_Bool" ^^ { _ => Type.bool } |
-      "void" ^^ { _ => TVoid }
+  def at[T](pos: Position, x: T): Positioned[T] = {
+    val pd = Positioned(x)
+    pd.setPos(pos)
+    pd
+  }
+
+  def declSpec: Parser[Positioned[DeclSpec]] =
+    pos("void") ^^ { s => at(s.pos, DeclSpec.Void) } |
+      pos("_Bool") ^^ { s => at(s.pos, DeclSpec.Bool) } |
+      pos("char") ^^ { s => at(s.pos, DeclSpec.Char) } |
+      pos("short") ^^ { s => at(s.pos, DeclSpec.Short) } |
+      pos("int") ^^ { s => at(s.pos, DeclSpec.Int) } |
+      pos("long") ^^ { s => at(s.pos, DeclSpec.Long) } |
+      pos("signed") ^^ { s => at(s.pos, DeclSpec.Signed) } |
+      pos("unsigned") ^^ { s => at(s.pos, DeclSpec.Unsigned) } |
+      pos("__int[0-9]+") ^^ { s => at(s.pos, DeclSpec.SizedInt(s.value.drop(5).toInt)) } |
+      pos("__nonstd") ^^ { s => at(s.pos, DeclSpec.Nonstd) }
+
+  val declSpecs: Parser[List[DeclSpec]] = rep1(declSpec) ^^ { specs =>
+    specs.foldLeft[List[DeclSpec]](Nil)((specs, spec) => DeclSpec.merge(specs, spec))
+  }
 
   def ident: Parser[String] =
     "[a-zA-Z_][a-zA-Z0-9_]*".r.filter(id =>
-      !reservedKeywords.contains(id) &&
-        // FIXME
-        !id.matches("u?int[0-9]+")
-    )
+      !(reservedKeywords.contains(id) ||
+        id.matches("__int[0-9]+")))
 
   def expr(scope: FScope): Parser[Expr] = assign_expr(scope)
 
@@ -574,7 +721,8 @@ object Parser extends RegexParsers {
 
   def cast_expr(scope: FScope): Parser[Expr] =
     unary_expr(scope) |
-      ("(" ~> typ) ~ (")" ~> unary_expr(scope)) ^^ { case typ ~ e =>
+      ("(" ~> declSpecs) ~ pos(")") ~ unary_expr(scope) ^^ { case specs ~ lparen ~ e =>
+        val typ = DeclSpec.typ(lparen.pos, specs)
         e.convert(typ)
       }
 
@@ -603,7 +751,8 @@ object Parser extends RegexParsers {
       "sizeof" ~> expr(scope) ^^ { e =>
         Expr.literal(Type.int, e.typ.size)
       } |
-      (("sizeof" ~ "(") ~> typ) <~ ")" ^^ { typ =>
+      (("sizeof" ~ "(") ~> declSpecs) ~ pos(")") ^^ { case specs ~ lparen =>
+        val typ = DeclSpec.typ(lparen.pos, specs)
         Expr.literal(Type.int, typ.size)
       } |
       postfix_expr(scope)
@@ -729,7 +878,7 @@ object Parser extends RegexParsers {
       pos(ident) <~ ":" ^^ { id =>
         val label = scope.functionScope.getLabel(id.value)
         if (label.definitionPos != null) {
-          parseError(
+          error(
             id.pos.fmt(s"redefinition of label '${id.value}'") +
               label.definitionPos.fmt("previous definition is here", level = "note"))
         }
@@ -741,15 +890,17 @@ object Parser extends RegexParsers {
       expr(scope) <~ ";" ^^ {
         expr => expr.effect()
       } |
-      "goto" ~> ident <~ ";" ^^ { id =>
-        val label = scope.functionScope.getLabel(id)
+      "goto" ~> pos(ident) <~ ";" ^^ { id =>
+        val label = scope.functionScope.getLabel(id.value)
+        if (label.usePos == null)
+          label.usePos = id.pos
+
         Block(new rtl.Goto(label.rtlLabel))
       } |
-      typ ~ pos(ident) ~ (opt("=" ~> expr(scope)) <~ ";") ^^ { case typ ~ id ~ initopt =>
+      declSpecs ~ pos(ident) ~ (opt("=" ~> expr(scope)) <~ ";") ^^ { case specs ~ id ~ initopt =>
+        val typ = DeclSpec.typ(id.pos, specs)
         if (typ == TVoid)
-          id.pos.parseError(s"variable '${
-            id.value
-          }' may not have 'void' type")
+          id.pos.error(s"variable '${id.value}' may not have 'void' type")
 
         val v = scope.declareLocal(id.pos, id.value, typ)
         initopt.map(init => v.assign(init)).getOrElse(Block.empty)
@@ -772,13 +923,12 @@ object Parser extends RegexParsers {
   }
 
   def param: Parser[Parameter] =
-    typ ~ pos(ident) ^^ { case t ~ id =>
-      if (t == TVoid)
-        id.pos.parseError(s"parameter '${
-          id.value
-        }' may not have 'void' type")
+    declSpecs ~ pos(ident) ^^ { case specs ~ id =>
+      val typ = DeclSpec.typ(id.pos, specs)
+      if (typ == TVoid)
+        id.pos.error(s"parameter '${id.value}' may not have 'void' type")
 
-      Parameter(id.pos, id.value, t)
+      Parameter(id.pos, id.value, typ)
     }
 
   def parameters: Parser[IndexedSeq[Parameter]] =
@@ -787,14 +937,21 @@ object Parser extends RegexParsers {
     }
 
   def function_head(fileScope: FileScope): Parser[Function] =
-    typ ~ pos(ident) ~ ("(" ~> parameters <~ ")") ^^ { case returnTyp ~ id ~ params =>
-      fileScope.declareFunction(id.pos, id.value, TFunction(returnTyp, params))
+    declSpecs ~ pos(ident) ~ ("(" ~> parameters <~ ")") ^^ { case specs ~ id ~ params =>
+      val returnTyp = DeclSpec.typ(id.pos, specs)
+      fileScope.declareFunction(id.pos, id.value, TFunction(returnTyp, params),
+        DeclSpec.isNonstd(specs))
     }
 
-  def function_body(fileScope: FileScope, f: Function): Parser[(IndexedSeq[rtl.Variable], Block)] = {
+  def function_body(fileScope: FileScope, f: Function): Parser[Block] = {
     val fscope = f.functionScope(fileScope)
     "{" ~> rep(stmt(fscope)) <~ "}" ^^ { stmts =>
-      (fscope.ab, stmts.foldLeft(Block.empty)(_ ++ _))
+      fscope.labels.values.foreach { label =>
+        if (label.definitionPos == null)
+          label.usePos.error(s"use of undeclared label '${label.id}'")
+      }
+
+      stmts.foldLeft(Block.empty)(_ ++ _)
     }
   }
 
@@ -802,17 +959,15 @@ object Parser extends RegexParsers {
     function_head(fileScope)
       .flatMap { f =>
         (";" |
-          function_body(fileScope, f) ^^ { case (vars, b) =>
-            f.rtlFunction.body = Some(rtl.FunctionBody(
-              vars,
-              b.stmts))
+          function_body(fileScope, f) ^^ { b =>
+            f.rtlFunction.body = Some(rtl.FunctionBody(b.stmts))
           }) ^^ { _ => f }
       }
 
   def compilation_unit: Parser[rtl.CompilationUnit] = {
     val fileScope = new FileScope
     rep(function(fileScope)) ^^ { _ =>
-      new rtl.CompilationUnit(fileScope.decls.values
+      rtl.CompilationUnit(fileScope.decls.values
         .map(_.asInstanceOf[Function].rtlFunction)
         .toSeq)
     }

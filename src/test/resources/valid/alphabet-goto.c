@@ -1,7 +1,7 @@
-void write_uart(uint8 c);
+void write_uart(unsigned char c);
 
 void write_alphabet() {
-  uint8 c;
+  unsigned char c;
   
  L:
   c = 97;

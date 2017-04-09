@@ -12,6 +12,9 @@ sealed abstract class Expr {
   }
 
   def pretty(): Unit = print(toString)
+
+  def variables(): Set[Variable] =
+    children.flatMap(_.variables()).toSet
 }
 
 case class Literal(size: Int, value: Int) extends Expr {
@@ -26,6 +29,8 @@ case class Ref(v: Variable) extends Expr {
   def size: Int = v.size
 
   override def toString = s"${v.id}"
+
+  override def variables(): Set[Variable] = Set(v)
 }
 
 abstract class UnaryExpr extends Expr {
@@ -197,6 +202,8 @@ sealed abstract class Statement {
 
   def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit =
     throw new UnsupportedOperationException
+
+  def variables(): Set[Variable] = Set.empty
 }
 
 class Assign(v: Variable, expr: Expr) extends Statement {
@@ -216,6 +223,7 @@ class Assign(v: Variable, expr: Expr) extends Statement {
     out.println(s"          __state <= $next;")
   }
 
+  override def variables(): Set[Variable] = expr.variables() + v
 }
 
 class Label(val id: String, var target: Target) {
@@ -270,6 +278,8 @@ class Branch(cond: Expr, thenLabel: Label, elseLabel: Label) extends Statement {
     out.println("          else")
     out.println(s"            __state <= ${elseLabel.target.id};")
   }
+
+  override def variables(): Set[Variable] = cond.variables()
 }
 
 class Call(val target: Function,
@@ -303,15 +313,13 @@ class Call(val target: Function,
 
     out.println(s"        $id : begin")
 
-    out.println(s"          if (__idle_${target.id}) begin")
-    out.println(s"            __start_${target.id} <= 1;")
+    out.println(s"          __start_${target.id} <= 1;")
 
     (target.parameters, arguments).zipped.foreach { (p, a) =>
-      out.println(s"            __p_${p.id}_${target.id} <= $a;")
+      out.println(s"          __p_${p.id}_${target.id} <= $a;")
     }
 
-    out.println(s"            __state <= $validState;")
-    out.println("          end")
+    out.println(s"          __state <= $validState;")
     out.println("        end")
 
     out.println(s"        $validState : begin")
@@ -324,6 +332,9 @@ class Call(val target: Function,
     out.println(s"          end")
     out.println("        end")
   }
+
+  override def variables(): Set[Variable] =
+    arguments.flatMap(_.variables()).toSet ++ returnVariable
 }
 
 class Return(expr: Option[Expr]) extends Statement {
@@ -347,10 +358,12 @@ class Return(expr: Option[Expr]) extends Statement {
 
     out.println(s"          __state <= ${b.returnState};")
   }
+
+  override def variables(): Set[Variable] =
+    expr.map(_.variables()).getOrElse(Set.empty)
 }
 
-case class FunctionBody(variables: IndexedSeq[Variable],
-                        stmts: IndexedSeq[Statement]) {
+case class FunctionBody(stmts: IndexedSeq[Statement]) {
   val idleState: Int = Statement.newId()
   val returnState: Int = Statement.newId()
 
@@ -408,7 +421,8 @@ case class FunctionBody(variables: IndexedSeq[Variable],
 
     out.println("  reg [31:0] __state;")
 
-    variables.foreach { v =>
+    val vars = stmts.flatMap(_.variables()).toSet
+    vars.foreach { v =>
       out.println(s"  reg [${v.size - 1}:0] ${v.id};")
     }
 
@@ -417,11 +431,16 @@ case class FunctionBody(variables: IndexedSeq[Variable],
 
     targets
       .filter(f => f.body.isDefined)
-      .foreach(_.emitInstance(true))
+      .foreach(_.emitInstance(out, reg = true))
 
     out.println("  always @(posedge __clk) begin")
     out.println("    if (!__resetn) begin")
     out.println(s"      __state <= $idleState;")
+
+    targets.foreach { f =>
+      out.println(s"      __start_${f.id} <= 0;")
+    }
+
     out.println("    end else begin")
     out.println("      case (__state)")
     out.println(s"        $idleState : begin")
@@ -470,7 +489,7 @@ case class FunctionBody(variables: IndexedSeq[Variable],
       out.println("  output __idle);")
       out.println("  output __valid);")
 
-      externTargets.foreach(_.emitInstance(false))
+      externTargets.foreach(_.emitInstance(out, reg = false))
 
       out.println(s"  ${f.id} ${f.id}_inst(")
       out.println("    .__clk(__clk),")
@@ -509,6 +528,7 @@ case class FunctionBody(variables: IndexedSeq[Variable],
 case class Function(id: String,
                     returnSize: Int,
                     parameters: IndexedSeq[Parameter],
+                    nonstd: Boolean,
                     var body: Option[FunctionBody]) {
   def check(): Unit = {
     body.foreach(_.check(this))
@@ -533,82 +553,38 @@ case class Function(id: String,
 
   def emit(out: PrintStream): Unit = body.foreach(_.emit(out, this))
 
-  def emitInstance(reg: Boolean): Unit = {
-    println("")
+  def emitInstance(out: PrintStream, reg: Boolean): Unit = {
+    out.println("")
 
     val t = if (reg) "reg" else "wire"
 
     parameters.foreach { p =>
-      println(s"  $t [${p.size - 1}:0] __p_${p.id}_$id;")
+      out.println(s"  $t [${p.size - 1}:0] __p_${p.id}_$id;")
     }
 
     if (returnSize > 0)
-      println(s"  wire [${returnSize - 1}:0] __retval_$id;")
+      out.println(s"  wire [${returnSize - 1}:0] __retval_$id;")
 
-    println(s"  $t __start_$id;")
-    println(s"  wire __idle_$id;")
-    println(s"  wire __valid_$id;")
+    out.println(s"  $t __start_$id;")
+    out.println(s"  wire __idle_$id;")
+    out.println(s"  wire __valid_$id;")
 
-    println(s"  $id __inst_$id(")
-    println("    .__clk(__clk),")
-    println("    .__resetn(__resetn),")
+    out.println(s"  $id __inst_$id(")
+    out.println("    .__clk(__clk),")
+    out.println("    .__resetn(__resetn),")
 
     parameters.foreach { p =>
-      println(s"    .__p_${p.id}(__p_${p.id}_$id),")
+      out.println(s"    .__p_${p.id}(__p_${p.id}_$id),")
     }
 
     if (returnSize > 0)
-      println(s"    .__retval(__retval_$id),")
+      out.println(s"    .__retval(__retval_$id),")
 
-    println(s"    .__start(__start_$id),")
-    println(s"    .__idle(__idle_$id),")
-    println(s"    .__valid(__valid_$id));")
+    out.println(s"    .__start(__start_$id),")
+    out.println(s"    .__idle(__idle_$id),")
+    out.println(s"    .__valid(__valid_$id));")
 
-    println("")
-  }
-}
-
-object CompilationUnit {
-  def example(): CompilationUnit = {
-    val writeUart = Function("write_uart",
-      0,
-      IndexedSeq(new Parameter("c", 8)),
-      None)
-
-    val c = new Local("c", 8)
-
-    val M = new Label("M")
-    val N = new Label("N")
-    val O = new Label("O")
-
-    val stmts = IndexedSeq(
-      new Assign(c, Literal(8, 0x61)),
-      new Goto(M),
-
-      new Target(M),
-      new Branch(RelationalExpr(Ref(c), Literal(8, 0x7a), "<=", isSigned = true), N, O),
-
-      new Target(N),
-      new Call(writeUart, None, IndexedSeq(
-        Ref(c))),
-      new Assign(c, AdditiveExpr(Ref(c), Literal(8, 1), "+")),
-      new Goto(M),
-
-      new Target(O),
-      new Call(writeUart, None, IndexedSeq(
-        Literal(8, 0xd))),
-      new Call(writeUart, None, IndexedSeq(
-        Literal(8, 0xa))),
-      new Return(None))
-
-    val writeAlphabet = Function("write_alphabet",
-      0,
-      IndexedSeq(),
-      Some(FunctionBody(IndexedSeq(c), stmts)))
-
-    val cu = CompilationUnit(Seq(writeUart, writeAlphabet))
-    cu.check()
-    cu
+    out.println("")
   }
 }
 

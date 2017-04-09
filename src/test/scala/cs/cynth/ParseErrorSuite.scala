@@ -12,7 +12,8 @@ class ParseErrorSuite extends FunSuite {
 
   val runFiles = Seq(
     "const.c",
-    "loop.c"
+    "loop.c",
+    "call.c"
   )
 
   test("run") {
@@ -43,7 +44,7 @@ class ParseErrorSuite extends FunSuite {
       topOut.println(s"  tb #(.expected($expected)) tb_inst();")
       topOut.println("endmodule")
 
-      val compileExitCode = "/usr/local/iverilog/bin/iverilog -s top -o top f.v tb.v top.v" !;
+      val compileExitCode = "/usr/local/iverilog/bin/iverilog -s top -o top src/test/resources/tb.v f.v top.v" !;
       assert(compileExitCode == 0)
 
       val simExitCode = "/usr/local/iverilog/bin/vvp top" !;
@@ -74,7 +75,8 @@ class ParseErrorSuite extends FunSuite {
     "incomplete-function.c",
     "label-redefinition.c",
     "call-var.c",
-    "fun-expr.c")
+    "fun-expr.c",
+    "undeclared-label.c")
 
   test("parse error") {
     parseErrorFiles.foreach { f =>
