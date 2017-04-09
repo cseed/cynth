@@ -112,7 +112,7 @@ object DeclSpec {
   case object Nonstd extends DeclSpec {
     override def toString: String = "__nonstd"
 
-    def isConcreteTypeSpecifier: Boolean = true
+    def isConcreteTypeSpecifier: Boolean = false
   }
 
   def merge(specs: List[DeclSpec], posSpec: Positioned[DeclSpec]): List[DeclSpec] = {

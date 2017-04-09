@@ -383,13 +383,13 @@ case class FunctionBody(stmts: IndexedSeq[Statement]) {
         case _ => None
       }.toSet
 
-    val externTargets = targets.filter(f => f.body.isEmpty)
+    val nonstdTargets = targets.filter(f => f.nonstd)
 
     out.println(s"module ${f.id}(")
     out.println("  input __clk,")
     out.println("  input __resetn,")
 
-    externTargets
+    nonstdTargets
       .foreach { f =>
         out.println("")
         out.println(s"  // ${f.id} interface")
@@ -430,7 +430,7 @@ case class FunctionBody(stmts: IndexedSeq[Statement]) {
     out.println(s"  assign __valid = (__state == $returnState);")
 
     targets
-      .filter(f => f.body.isDefined)
+      .filter(f => !f.nonstd)
       .foreach(_.emitInstance(out, reg = true))
 
     out.println("  always @(posedge __clk) begin")
@@ -472,56 +472,6 @@ case class FunctionBody(stmts: IndexedSeq[Statement]) {
     out.println("")
 
     out.println("endmodule")
-
-    if (externTargets.nonEmpty) {
-      out.println(s"module ${f.id}_top_template(")
-      out.println("  input __clk,")
-      out.println("  input __resetn,")
-
-      f.parameters.foreach { p =>
-        out.println(s"  input [${p.size - 1}:0] __p_${p.id},")
-      }
-
-      if (f.returnSize > 0)
-        out.println(s"  output [${f.returnSize - 1}:0] __retval,")
-
-      out.println("  input __start,")
-      out.println("  output __idle);")
-      out.println("  output __valid);")
-
-      externTargets.foreach(_.emitInstance(out, reg = false))
-
-      out.println(s"  ${f.id} ${f.id}_inst(")
-      out.println("    .__clk(__clk),")
-      out.println("    .__resetn(__resetn),")
-
-      externTargets.foreach { f =>
-        f.parameters.foreach { p =>
-          out.println(s"    .__p_${p.id}_${f.id}(__p_${p.id}_${f.id}),")
-        }
-
-        if (f.returnSize > 0)
-          out.println(s"    .__retval_${f.id}(__retval_${f.id}),")
-
-        out.println(s"    .__start_${f.id}(__start_${f.id}),")
-        out.println(s"    .__idle_${f.id}(__idle_${f.id}),")
-        out.println(s"    .__valid_${f.id}(__valid_${f.id}),")
-      }
-
-      f.parameters.foreach { p =>
-        out.println(s"    .__p_${p.id}(__p_${p.id}),")
-      }
-
-      if (f.returnSize > 0)
-        out.println(s"    .__reval(__reval),")
-
-      out.println("    .__start(__start),")
-      out.println("    .__idle(__idle),")
-      out.println("    .__valid(__valid));")
-
-      out.println("")
-      out.println("endmodule")
-    }
   }
 }
 
