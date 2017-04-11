@@ -2,6 +2,19 @@ package cs.cynth.rtl
 
 import java.io.PrintStream
 
+import scala.collection.mutable
+
+class EmitContext {
+  val decls: mutable.ArrayBuffer[String] = mutable.ArrayBuffer.empty
+  val stmts: mutable.ArrayBuffer[String] = mutable.ArrayBuffer.empty
+
+  def emit(out: PrintStream): Unit = {
+    decls.foreach(out.println)
+    stmts.foreach(out.println)
+  }
+}
+
+
 sealed abstract class Expr {
   def size: Int
 
@@ -15,12 +28,14 @@ sealed abstract class Expr {
 
   def variables(): Set[Variable] =
     children.flatMap(_.variables()).toSet
+
+  def emit(c: EmitContext): String
 }
 
 case class Literal(size: Int, value: Int) extends Expr {
   def children = IndexedSeq()
 
-  override def toString = s"$size'd$value"
+  def emit(c: EmitContext) = s"$size'd$value"
 }
 
 case class Ref(v: Variable) extends Expr {
@@ -28,7 +43,7 @@ case class Ref(v: Variable) extends Expr {
 
   def size: Int = v.size
 
-  override def toString = s"${v.id}"
+  def emit(c: EmitContext) = s"${v.id}"
 
   override def variables(): Set[Variable] = Set(v)
 }
@@ -65,63 +80,73 @@ abstract class CompareExpr extends BinaryExpr {
 }
 
 case class AdditiveExpr(left: Expr, right: Expr, op: String) extends BinaryArithExpr {
-  override def toString = s"($left) $op ($right)"
+  def emit(c: EmitContext) = s"(${left.emit(c)}) $op (${right.emit(c)})"
 }
 
 case class Neg(child: Expr) extends UnaryArithExpr {
-  override def toString = "_ ($child)"
+  def emit(c: EmitContext) = s"- (${child.emit(c)})"
 }
 
 case class Not(child: Expr) extends UnaryArithExpr {
-  override def toString = "~ ($child)"
+  override def emit(c: EmitContext) = s"~ (${}child.emit(c)})"
 }
 
 case class RelationalExpr(left: Expr, right: Expr, op: String, isSigned: Boolean) extends CompareExpr {
-  override def toString: String = {
+  override def emit(c: EmitContext): String = {
     val s = if (isSigned) "$signed" else ""
-    s"$s($left) $op $s($right)"
+    s"$s(${left.emit(c)}) $op $s(${right.emit(c)})"
   }
 }
 
 case class BinaryLogicalExpr(left: Expr, right: Expr, op: String) extends BinaryExpr {
   def size: Int = left.size
 
-  override def toString: String = {
-    s"($left) $op ($right)"
-  }
+  def emit(c: EmitContext) =
+    s"(${left.emit(c)}) $op (${right.emit(c)})"
 }
 
 case class ShiftLeft(child: Expr, right: Int) extends UnaryExpr {
   def size: Int = child.size
 
-  override def toString: String = {
+  def emit(c: EmitContext): String = {
+    val t = gensym("t")
+    c.decls += s"          reg [${child.size - 1}:0] $t;"
+    c.stmts += s"          $t = ${child.emit(c)};"
+
     if (right >= size)
       s"$size'd0"
     else
-      s"{$child[${size - 1}:$right], $right'd0}"
+      s"{$t[${size - 1}:$right], $right'd0}"
   }
 }
 
 case class ShiftRightLogical(child: Expr, right: Int) extends UnaryExpr {
   def size: Int = child.size
 
-  override def toString: String = {
+  def emit(c: EmitContext): String = {
+    val t = gensym("t")
+    c.decls += s"          reg [${child.size - 1}:0] $t;"
+    c.stmts += s"          $t = ${child.emit(c)};"
+
     if (right >= size)
       s"$size'd0"
     else
-      s"{$right'd0, $child[${size - right - 1}:0]}"
+      s"{$right'd0, $t[${size - right - 1}:0]}"
   }
 }
 
 case class ShiftRightArithmetic(child: Expr, right: Int) extends UnaryExpr {
   def size: Int = child.size
 
-  override def toString: String = {
+  override def emit(c: EmitContext): String = {
+    val t = gensym("t")
+    c.decls += s"          reg [${child.size - 1}:0] $t;"
+    c.stmts += s"          $t = ${child.emit(c)};"
+
     if (right >= size)
       s"$size'd0"
     else
-    // FIXME deduplicate
-      s"{$right{$child[${size - 1}]}, $child[${size - right - 1}:0]}"
+      s"{{$right{$t[${size - 1}]}}, $t[${size - right - 1}:0]}"
   }
 }
 
@@ -135,7 +160,7 @@ case class Mux(cond: Expr, left: Expr, right: Expr) extends Expr {
 
   def size: Int = left.size
 
-  override def toString: String = s"($cond) ? ($left) : ($right)"
+  def emit(c: EmitContext): String = s"(${cond.emit(c)}) ? (${left.emit(c)}) : (${right.emit(c)})"
 }
 
 case class SignExtend(size: Int, child: Expr) extends UnaryExpr {
@@ -144,7 +169,13 @@ case class SignExtend(size: Int, child: Expr) extends UnaryExpr {
     assert(child.size < size)
   }
 
-  override def toString = s"{${size - child.size}{($child)[${child.size - 1}]}, $child}"
+  def emit(c: EmitContext): String = {
+    val t = gensym("t")
+    c.decls += s"          reg [${child.size - 1}:0] $t;"
+    c.stmts += s"          $t = ${child.emit(c)};"
+
+    s"{{${size - child.size}{$t[${child.size - 1}]}}, $t}"
+  }
 }
 
 case class ZeroExtend(size: Int, child: Expr) extends UnaryExpr {
@@ -153,7 +184,7 @@ case class ZeroExtend(size: Int, child: Expr) extends UnaryExpr {
     assert(child.size < size)
   }
 
-  override def toString = s"{${size - child.size}'d0, ($child)}"
+  def emit(c: EmitContext) = s"{${size - child.size}'d0, (${child.emit(c)})}"
 }
 
 case class Truncate(size: Int, child: Expr) extends UnaryExpr {
@@ -162,7 +193,13 @@ case class Truncate(size: Int, child: Expr) extends UnaryExpr {
     assert(size < child.size)
   }
 
-  override def toString = s"($child)[${size - 1}:0]"
+  def emit(c: EmitContext) = {
+    val t = gensym("t")
+    c.decls += s"          reg [${child.size - 1}:0] $t;"
+    c.stmts += s"          $t = ${child.emit(c)};"
+
+    s"$t[${size - 1}:0]"
+  }
 }
 
 sealed abstract class Variable {
@@ -195,7 +232,9 @@ sealed abstract class Statement {
   def pretty(): Unit
 
   def emit(out: PrintStream, b: FunctionBody, next: Int): Unit = {
-    out.println(s"        $id : begin")
+    val blockLabel = gensym("block")
+
+    out.println(s"        $id : begin : $blockLabel")
     emitBody(out: PrintStream, b, next)
     out.println("        end")
   }
@@ -219,7 +258,10 @@ class Assign(v: Variable, expr: Expr) extends Statement {
   }
 
   override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
-    out.println(s"          ${v.id} <= $expr;")
+    val c = new EmitContext()
+    val exprS = expr.emit(c)
+    c.emit(out)
+    out.println(s"          ${v.id} <= $exprS;")
     out.println(s"          __state <= $next;")
   }
 
@@ -273,7 +315,10 @@ class Branch(cond: Expr, thenLabel: Label, elseLabel: Label) extends Statement {
   }
 
   override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
-    out.println(s"          if ($cond)")
+    val c = new EmitContext()
+    val condS = cond.emit(c)
+    c.emit(out)
+    out.println(s"          if ($condS)")
     out.println(s"            __state <= ${thenLabel.target.id};")
     out.println("          else")
     out.println(s"            __state <= ${elseLabel.target.id};")
@@ -315,7 +360,10 @@ class Call(val target: Function,
 
     out.println(s"          __start_${target.id} <= 1;")
 
-    (target.parameters, arguments).zipped.foreach { (p, a) =>
+    val c = new EmitContext()
+    val argumentsS = arguments.map(_.emit(c))
+    c.emit(out)
+    (target.parameters, argumentsS).zipped.foreach { (p, a) =>
       out.println(s"          __p_${p.id}_${target.id} <= $a;")
     }
 
@@ -353,7 +401,10 @@ class Return(expr: Option[Expr]) extends Statement {
 
   override def emitBody(out: PrintStream, b: FunctionBody, next: Int): Unit = {
     expr.foreach { e =>
-      out.println(s"          __retval <= $e;")
+      val c = new EmitContext()
+      val eS = e.emit(c)
+      c.emit(out)
+      out.println(s"          __retval <= $eS;")
     }
 
     out.println(s"          __state <= ${b.returnState};")

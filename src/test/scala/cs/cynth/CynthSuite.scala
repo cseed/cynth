@@ -8,12 +8,14 @@ import scala.io.Source
 import scala.sys.process._
 import scala.language.postfixOps
 
-class ParseErrorSuite extends FunSuite {
+class CynthSuite extends FunSuite {
 
   val runFiles = Seq(
     "const.c",
     "loop.c",
-    "call.c"
+    "call.c",
+    "zero-extend.c",
+    "sign-extend.c"
   )
 
   test("run") {
