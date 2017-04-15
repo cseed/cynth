@@ -573,8 +573,8 @@ object Parser extends RegexParsers {
         v.assign(VExpr(lp.typ,
           lp.b,
           op match {
-            case "<<" => rtl.ShiftLeft(lp.expr, dist)
-            case ">>" =>
+            case "<<=" => rtl.ShiftLeft(lp.expr, dist)
+            case ">>=" =>
               if (lp.typ.isSigned)
                 rtl.ShiftRightArithmetic(lp.expr, dist)
               else
