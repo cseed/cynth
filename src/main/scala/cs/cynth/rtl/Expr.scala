@@ -355,8 +355,9 @@ class Call(val target: Function,
 
   override def emit(out: PrintStream, b: FunctionBody, next: Int): Unit = {
     val validState = Statement.newId()
+    val blockLabel = gensym("block")
 
-    out.println(s"        $id : begin")
+    out.println(s"        $id : begin : $blockLabel")
 
     val c = new EmitContext()
     val argumentsS = arguments.map(_.emit(c))
