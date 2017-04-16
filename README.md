@@ -118,3 +118,6 @@ void roving() {
 
 `write_leds` and `sleep` are both implemented in Verilog.
 `write_leds` is non-standard since it has signals to drive the LEDs.
+
+To build the example, just run `make` in the example directory.  To
+flash it to the board, run `make program`.  This has been tested on Linux with Vivado 2016.4.

@@ -46,10 +46,10 @@ class CynthSuite extends FunSuite {
       topOut.println(s"  tb #(.expected($expected)) tb_inst();")
       topOut.println("endmodule")
 
-      val compileExitCode = "/usr/local/iverilog/bin/iverilog -s top -o top src/test/resources/tb.v f.v top.v" !;
+      val compileExitCode = "/usr/local/bin/iverilog -s top -o top src/test/resources/tb.v f.v top.v" !;
       assert(compileExitCode == 0)
 
-      val simExitCode = "/usr/local/iverilog/bin/vvp top" !;
+      val simExitCode = "/usr/local/bin/vvp top" !;
       assert(simExitCode == 0)
     }
   }
