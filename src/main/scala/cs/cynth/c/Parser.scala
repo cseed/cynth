@@ -535,7 +535,7 @@ object Parser extends RegexParsers {
       pos("long") ^^ { s => at(s.pos, DeclSpec.Long) } |
       pos("signed") ^^ { s => at(s.pos, DeclSpec.Signed) } |
       pos("unsigned") ^^ { s => at(s.pos, DeclSpec.Unsigned) } |
-      pos("__int[0-9]+") ^^ { s => at(s.pos, DeclSpec.SizedInt(s.value.drop(5).toInt)) } |
+      pos("__int[0-9]+".r) ^^ { s => at(s.pos, DeclSpec.SizedInt(s.value.drop(5).toInt)) } |
       pos("__nonstd") ^^ { s => at(s.pos, DeclSpec.Nonstd) }
 
   val declSpecs: Parser[List[DeclSpec]] = rep1(declSpec) ^^ { specs =>
