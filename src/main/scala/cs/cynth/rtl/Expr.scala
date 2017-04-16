@@ -116,7 +116,7 @@ case class ShiftLeft(child: Expr, right: Int) extends UnaryExpr {
     if (right >= size)
       s"$size'd0"
     else
-      s"{$t[${size - 1}:$right], $right'd0}"
+      s"{$t[${size - right - 1}:0], $right'd0}"
   }
 }
 
@@ -131,7 +131,7 @@ case class ShiftRightLogical(child: Expr, right: Int) extends UnaryExpr {
     if (right >= size)
       s"$size'd0"
     else
-      s"{$right'd0, $t[${size - right - 1}:0]}"
+      s"{$right'd0, $t[${size - 1}:$right]}"
   }
 }
 
@@ -146,7 +146,7 @@ case class ShiftRightArithmetic(child: Expr, right: Int) extends UnaryExpr {
     if (right >= size)
       s"$size'd0"
     else
-      s"{{$right{$t[${size - 1}]}}, $t[${size - right - 1}:0]}"
+      s"{{$right{$t[${size - 1}]}}, $t[${size - 1}:$right]}"
   }
 }
 
