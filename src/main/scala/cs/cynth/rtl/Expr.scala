@@ -358,8 +358,6 @@ class Call(val target: Function,
 
     out.println(s"        $id : begin")
 
-    out.println(s"          __start_${target.id} <= 1;")
-
     val c = new EmitContext()
     val argumentsS = arguments.map(_.emit(c))
     c.emit(out)
@@ -367,6 +365,7 @@ class Call(val target: Function,
       out.println(s"          __p_${p.id}_${target.id} <= $a;")
     }
 
+    out.println(s"          __start_${target.id} <= 1;")
     out.println(s"          __state <= $validState;")
     out.println("        end")
 
